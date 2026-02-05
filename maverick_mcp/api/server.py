@@ -372,8 +372,11 @@ rate_limit_config = RateLimitConfig(
         int(settings.middleware.api_rate_limit_per_minute / 2), 1
     ),  # Analysis is more expensive
 )
-mcp.add_middleware(Middleware(EnhancedRateLimitMiddleware, config=rate_limit_config))
-logger.info("Enhanced Rate Limiting Middleware added to MCP server")
+# Fix: Add middleware to FastAPI app, not MCP protocol layer
+# mcp.add_middleware() expects a callable, not a Middleware object
+if hasattr(mcp, "fastapi_app") and mcp.fastapi_app:
+    mcp.fastapi_app.add_middleware(EnhancedRateLimitMiddleware, config=rate_limit_config)
+    logger.info("Enhanced Rate Limiting Middleware added to FastAPI application")
 
 # Initialize enhanced health monitoring system
 logger.info("Initializing enhanced health monitoring system...")
