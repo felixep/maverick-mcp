@@ -37,7 +37,12 @@ RUN uv sync --frozen
 # Copy application code
 COPY maverick_mcp ./maverick_mcp
 COPY alembic ./alembic
+COPY scripts ./scripts
 COPY alembic.ini setup.py ./
+
+# Copy and set up entrypoint
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -52,5 +57,6 @@ USER maverick
 
 EXPOSE 8000
 
-# Start MCP server
+# Use entrypoint for migrations, CMD for server
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["uv", "run", "python", "-m", "maverick_mcp.api.server", "--transport", "sse", "--host", "0.0.0.0", "--port", "8000"]
