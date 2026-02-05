@@ -81,26 +81,34 @@ seed_database() {
         return 0
     fi
 
-    # Check if database already has data
-    STOCK_COUNT=$(uv run python -c "
+    # Force seed if FORCE_SEED is set
+    if [ "${FORCE_SEED:-false}" == "true" ]; then
+        echo "FORCE_SEED enabled, seeding database..."
+        uv run python scripts/seed_db.py
+        echo "Database seeded successfully"
+        return 0
+    fi
+
+    # Check if screening tables have data (more important than just stocks)
+    SCREENING_COUNT=$(uv run python -c "
 from sqlalchemy import create_engine, text
 import os
 try:
     engine = create_engine(os.environ.get('DATABASE_URL', 'sqlite:///maverick_mcp.db'))
     with engine.connect() as conn:
-        result = conn.execute(text('SELECT COUNT(*) FROM mcp_stocks'))
+        result = conn.execute(text('SELECT COUNT(*) FROM mcp_maverick_stocks'))
         count = result.scalar()
         print(count)
 except Exception as e:
     print('0')
 " 2>/dev/null || echo "0")
 
-    if [ "$STOCK_COUNT" -gt "0" ]; then
-        echo "Database already has $STOCK_COUNT stocks, skipping seed"
+    if [ "$SCREENING_COUNT" -gt "0" ]; then
+        echo "Database already has $SCREENING_COUNT screening results, skipping seed"
         return 0
     fi
 
-    echo "Seeding database with sample data..."
+    echo "No screening data found, seeding database..."
     uv run python scripts/seed_db.py
     echo "Database seeded successfully"
 }
