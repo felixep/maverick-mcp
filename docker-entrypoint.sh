@@ -75,16 +75,35 @@ run_migrations() {
 seed_database() {
     echo "Checking if database needs seeding..."
 
+    # Determine which seed script to use
+    # SEED_MODE: "sample" (default), "sp500", or "tiingo"
+    SEED_MODE="${SEED_MODE:-sample}"
+
+    case "$SEED_MODE" in
+        sp500)
+            SEED_SCRIPT="scripts/seed_sp500.py"
+            SEED_DESC="S&P 500 stocks"
+            ;;
+        tiingo)
+            SEED_SCRIPT="scripts/load_tiingo_data.py"
+            SEED_DESC="Tiingo market data"
+            ;;
+        *)
+            SEED_SCRIPT="scripts/seed_db.py"
+            SEED_DESC="sample data"
+            ;;
+    esac
+
     # Check if seed script exists
-    if [ ! -f "scripts/seed_db.py" ]; then
-        echo "No seed script found, skipping"
+    if [ ! -f "$SEED_SCRIPT" ]; then
+        echo "Seed script not found: $SEED_SCRIPT, skipping"
         return 0
     fi
 
     # Force seed if FORCE_SEED is set
     if [ "${FORCE_SEED:-false}" == "true" ]; then
-        echo "FORCE_SEED enabled, seeding database..."
-        uv run python scripts/seed_db.py
+        echo "FORCE_SEED enabled, seeding database with $SEED_DESC..."
+        uv run python "$SEED_SCRIPT"
         echo "Database seeded successfully"
         return 0
     fi
@@ -108,8 +127,8 @@ except Exception as e:
         return 0
     fi
 
-    echo "No screening data found, seeding database..."
-    uv run python scripts/seed_db.py
+    echo "No screening data found, seeding database with $SEED_DESC..."
+    uv run python "$SEED_SCRIPT"
     echo "Database seeded successfully"
 }
 
