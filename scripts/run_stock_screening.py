@@ -176,17 +176,30 @@ class StockScreener:
 
         return df
 
-    async def run_maverick_screening(self, session) -> list[dict]:
+    def _query_stocks(self, session, symbols: list[str] | None = None):
+        """Query stocks, optionally filtered to specific symbols."""
+        query = session.query(Stock).filter(Stock.is_active)
+        if symbols:
+            query = query.filter(Stock.ticker_symbol.in_(symbols))
+        return query.all()
+
+    async def run_maverick_screening(
+        self, session, symbols: list[str] | None = None
+    ) -> list[dict]:
         """
         Run Maverick momentum screening algorithm.
+
+        Args:
+            session: Database session
+            symbols: Optional list of ticker symbols to screen. If None, screens all active stocks.
 
         Returns:
             List of screening results
         """
-        logger.info("Running Maverick momentum screening...")
+        scope = f" for {len(symbols)} symbols" if symbols else " (all stocks)"
+        logger.info(f"Running Maverick momentum screening{scope}...")
 
-        # Get all active stocks
-        stocks = session.query(Stock).filter(Stock.is_active).all()
+        stocks = self._query_stocks(session, symbols)
         results = []
 
         for stock in stocks:
@@ -269,16 +282,23 @@ class StockScreener:
         logger.info(f"Maverick screening found {len(results)} candidates")
         return results
 
-    async def run_bear_screening(self, session) -> list[dict]:
+    async def run_bear_screening(
+        self, session, symbols: list[str] | None = None
+    ) -> list[dict]:
         """
         Run bear market screening algorithm.
+
+        Args:
+            session: Database session
+            symbols: Optional list of ticker symbols to screen. If None, screens all active stocks.
 
         Returns:
             List of screening results
         """
-        logger.info("Running bear market screening...")
+        scope = f" for {len(symbols)} symbols" if symbols else " (all stocks)"
+        logger.info(f"Running bear market screening{scope}...")
 
-        stocks = session.query(Stock).filter(Stock.is_active).all()
+        stocks = self._query_stocks(session, symbols)
         results = []
 
         for stock in stocks:
@@ -372,16 +392,23 @@ class StockScreener:
         logger.info(f"Bear screening found {len(results)} candidates")
         return results
 
-    async def run_supply_demand_screening(self, session) -> list[dict]:
+    async def run_supply_demand_screening(
+        self, session, symbols: list[str] | None = None
+    ) -> list[dict]:
         """
         Run supply/demand breakout screening algorithm.
+
+        Args:
+            session: Database session
+            symbols: Optional list of ticker symbols to screen. If None, screens all active stocks.
 
         Returns:
             List of screening results
         """
-        logger.info("Running supply/demand breakout screening...")
+        scope = f" for {len(symbols)} symbols" if symbols else " (all stocks)"
+        logger.info(f"Running supply/demand breakout screening{scope}...")
 
-        stocks = session.query(Stock).filter(Stock.is_active).all()
+        stocks = self._query_stocks(session, symbols)
         results = []
 
         for stock in stocks:

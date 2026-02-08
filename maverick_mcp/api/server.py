@@ -939,15 +939,18 @@ def portfolio_holdings_resource() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def screening_refresh_now() -> dict[str, Any]:
+async def screening_refresh_now(
+    symbols: list[str] | None = None,
+) -> dict[str, Any]:
     """
-    Manually trigger a full screening refresh.
+    Trigger a screening refresh, optionally for specific symbols only.
 
     Runs all three screening algorithms (Maverick bullish, Bear, Supply/Demand breakout)
     using TA-Lib on the latest price data. Updates the screening tables with fresh results.
 
-    This is useful when you want immediate screening data after market close
-    without waiting for the daily scheduler.
+    Args:
+        symbols: Optional list of ticker symbols to screen (e.g. ["AAPL", "NVDA"]).
+                 If omitted, runs a full refresh across all active stocks.
 
     Returns:
         Dictionary with screening counts for each category and execution status.
@@ -955,7 +958,7 @@ async def screening_refresh_now() -> dict[str, Any]:
     from maverick_mcp.utils.screening_scheduler import get_screening_scheduler
 
     scheduler = get_screening_scheduler()
-    results = await scheduler.run_screening()
+    results = await scheduler.run_screening(symbols=symbols)
     return results
 
 

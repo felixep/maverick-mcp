@@ -103,18 +103,26 @@ class ScreeningScheduler:
                 logger.error(f"Scheduler loop error: {e}")
                 await asyncio.sleep(300)  # Wait 5 min on error
 
-    async def run_screening(self) -> dict:
-        """Run the full screening pipeline. Can be called manually or by scheduler."""
+    async def run_screening(self, symbols: list[str] | None = None) -> dict:
+        """Run the screening pipeline.
+
+        Args:
+            symbols: Optional list of ticker symbols to screen.
+                     If None, screens all active stocks (full refresh).
+                     If provided, only screens those specific symbols.
+        """
+        scope = f"{len(symbols)} symbols" if symbols else "all stocks"
         results = {
             "started_at": datetime.now(timezone.utc).isoformat(),
             "status": "running",
+            "symbols_requested": symbols,
             "maverick": 0,
             "bear": 0,
             "supply_demand": 0,
         }
 
         try:
-            logger.info("Starting screening refresh...")
+            logger.info(f"Starting screening refresh ({scope})...")
 
             # Import here to avoid circular imports
             from maverick_mcp.config.database_self_contained import (
@@ -148,7 +156,9 @@ class ScreeningScheduler:
             with SelfContainedDatabaseSession() as session:
                 # Maverick (bullish) screening
                 try:
-                    maverick_results = await screener.run_maverick_screening(session)
+                    maverick_results = await screener.run_maverick_screening(
+                        session, symbols=symbols
+                    )
                     if maverick_results:
                         count = bulk_insert_screening_data(
                             session, MaverickStocks, maverick_results, today
@@ -160,7 +170,9 @@ class ScreeningScheduler:
 
                 # Bear screening
                 try:
-                    bear_results = await screener.run_bear_screening(session)
+                    bear_results = await screener.run_bear_screening(
+                        session, symbols=symbols
+                    )
                     if bear_results:
                         count = bulk_insert_screening_data(
                             session, MaverickBearStocks, bear_results, today
@@ -172,7 +184,9 @@ class ScreeningScheduler:
 
                 # Supply/Demand breakout screening
                 try:
-                    sd_results = await screener.run_supply_demand_screening(session)
+                    sd_results = await screener.run_supply_demand_screening(
+                        session, symbols=symbols
+                    )
                     if sd_results:
                         count = bulk_insert_screening_data(
                             session, SupplyDemandBreakoutStocks, sd_results, today
@@ -185,7 +199,7 @@ class ScreeningScheduler:
             results["status"] = "completed"
             results["completed_at"] = datetime.now(timezone.utc).isoformat()
             logger.info(
-                f"Screening refresh complete: "
+                f"Screening refresh complete ({scope}): "
                 f"maverick={results['maverick']}, "
                 f"bear={results['bear']}, "
                 f"supply_demand={results['supply_demand']}"
