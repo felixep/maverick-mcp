@@ -9,6 +9,9 @@ echo "=== MaverickMCP Container Starting ==="
 # Normalize API key env vars (different scripts expect different names)
 export TIINGO_API_TOKEN="${TIINGO_API_TOKEN:-$TIINGO_API_KEY}"
 
+# Debug: show database URL (mask password)
+echo "DATABASE_URL: $(echo "$DATABASE_URL" | sed -E 's|(://[^:]+:)[^@]+(@)|\1****\2|')"
+
 # Function to wait for database
 wait_for_db() {
     echo "Checking database connection..."
@@ -32,15 +35,18 @@ wait_for_db() {
 
         while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             if uv run python -c "
+import os
 from sqlalchemy import create_engine, text
 try:
-    engine = create_engine('$DATABASE_URL')
+    url = os.environ['DATABASE_URL']
+    engine = create_engine(url)
     with engine.connect() as conn:
         conn.execute(text('SELECT 1'))
     exit(0)
-except:
+except Exception as e:
+    print(f'Connection failed: {e}')
     exit(1)
-" 2>/dev/null; then
+"; then
                 echo "Database connection successful"
                 return 0
             fi
@@ -153,7 +159,8 @@ except Exception as e:
 run_full_screening() {
     if [ -f "scripts/run_stock_screening.py" ]; then
         echo "Running full TA-Lib screening pipeline..."
-        uv run python scripts/run_stock_screening.py --all --database-url "$DATABASE_URL" || {
+        # Note: run_stock_screening.py reads DATABASE_URL from env if --database-url not given
+        uv run python scripts/run_stock_screening.py --all || {
             echo "WARNING: Full screening failed (non-fatal), Tiingo screening results still available"
         }
     fi
