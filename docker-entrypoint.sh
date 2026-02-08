@@ -119,6 +119,7 @@ seed_database() {
     if [ "${FORCE_SEED:-false}" == "true" ]; then
         echo "FORCE_SEED enabled, seeding database with $SEED_DESC..."
         eval "$SEED_CMD"
+        run_full_screening
         echo "Database seeded successfully"
         return 0
     fi
@@ -144,7 +145,18 @@ except Exception as e:
 
     echo "No screening data found, seeding database with $SEED_DESC..."
     eval "$SEED_CMD"
+    run_full_screening
     echo "Database seeded successfully"
+}
+
+# Function to run the full TA-Lib screening pipeline (more sophisticated than Tiingo's built-in)
+run_full_screening() {
+    if [ -f "scripts/run_stock_screening.py" ]; then
+        echo "Running full TA-Lib screening pipeline..."
+        uv run python scripts/run_stock_screening.py --all --database-url "$DATABASE_URL" || {
+            echo "WARNING: Full screening failed (non-fatal), Tiingo screening results still available"
+        }
+    fi
 }
 
 # Main execution

@@ -935,6 +935,47 @@ def portfolio_holdings_resource() -> dict[str, Any]:
         }
 
 
+# Screening Scheduler Tools
+
+
+@mcp.tool()
+async def screening_refresh_now() -> dict[str, Any]:
+    """
+    Manually trigger a full screening refresh.
+
+    Runs all three screening algorithms (Maverick bullish, Bear, Supply/Demand breakout)
+    using TA-Lib on the latest price data. Updates the screening tables with fresh results.
+
+    This is useful when you want immediate screening data after market close
+    without waiting for the daily scheduler.
+
+    Returns:
+        Dictionary with screening counts for each category and execution status.
+    """
+    from maverick_mcp.utils.screening_scheduler import get_screening_scheduler
+
+    scheduler = get_screening_scheduler()
+    results = await scheduler.run_screening()
+    return results
+
+
+@mcp.tool()
+async def screening_get_scheduler_status() -> dict[str, Any]:
+    """
+    Get the status of the daily screening scheduler.
+
+    Shows whether the scheduler is running, when the last screening ran,
+    and when the next one is scheduled.
+
+    Returns:
+        Dictionary with scheduler status, timing, and next run information.
+    """
+    from maverick_mcp.utils.screening_scheduler import get_screening_scheduler
+
+    scheduler = get_screening_scheduler()
+    return scheduler.status
+
+
 # Main execution block
 if __name__ == "__main__":
     import asyncio
@@ -998,6 +1039,17 @@ if __name__ == "__main__":
             logger.info("✅ Background health monitoring started")
         except Exception as e:
             logger.error(f"Failed to start health monitoring: {e}")
+
+        # Start daily screening scheduler
+        logger.info("Starting daily screening scheduler...")
+        try:
+            from maverick_mcp.utils.screening_scheduler import get_screening_scheduler
+
+            scheduler = get_screening_scheduler()
+            await scheduler.start()
+            logger.info("✅ Daily screening scheduler started (5:30 PM ET)")
+        except Exception as e:
+            logger.error(f"Failed to start screening scheduler: {e}")
 
     asyncio.run(init_systems())
 
@@ -1127,6 +1179,20 @@ if __name__ == "__main__":
                 logger.error(f"Error shutting down connection manager: {e}")
 
         shutdown_handler.register_cleanup(cleanup_connection_manager)
+
+        # Register screening scheduler cleanup
+        async def cleanup_screening_scheduler():
+            """Stop the screening scheduler during shutdown."""
+            try:
+                from maverick_mcp.utils.screening_scheduler import get_screening_scheduler
+
+                scheduler = get_screening_scheduler()
+                await scheduler.stop()
+                logger.info("Screening scheduler stopped")
+            except Exception as e:
+                logger.error(f"Error stopping screening scheduler: {e}")
+
+        shutdown_handler.register_cleanup(cleanup_screening_scheduler)
 
         # Register cache cleanup
         def close_cache():
