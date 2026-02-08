@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from io import StringIO
@@ -825,7 +826,7 @@ def _fetch_tiingo_supported_tickers() -> set[str]:
 def _normalize_ticker(symbol: str) -> str:
     """Normalize ticker symbol for Tiingo compatibility.
 
-    Wikipedia uses dots (BRK.B, BF.B) while Tiingo uses dashes (BRK-B, BF-B).
+    Some sources use dots (BRK.B, BF.B) while Tiingo uses dashes (BRK-B, BF-B).
     """
     return symbol.strip().upper().replace(".", "-")
 
@@ -842,21 +843,78 @@ def _load_symbols_from_file(filepath: str) -> list[str] | None:
         return None
 
 
-def _fetch_wikipedia_sp500() -> list[str] | None:
-    """Fetch S&P 500 symbols from Wikipedia. Returns None on failure."""
+def _fetch_stockanalysis_sp500() -> list[str] | None:
+    """Fetch S&P 500 symbols from stockanalysis.com embedded SvelteKit data."""
     import urllib.request
 
     try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        url = "https://stockanalysis.com/list/sp-500-stocks/"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             html = response.read().decode("utf-8")
-        tables = pd.read_html(StringIO(html))
-        raw_symbols = tables[0]["Symbol"].tolist()
-        logger.info(f"Fetched {len(raw_symbols)} S&P 500 symbols from Wikipedia")
-        return [_normalize_ticker(s) for s in raw_symbols]
+
+        # Extract ticker symbols from embedded SvelteKit JSON data
+        # Pattern matches: "s":"AAPL" or s:"AAPL" in the serialized data
+        raw_symbols = re.findall(r'["\']?s["\']?\s*:\s*"([A-Z]{1,5}(?:\.[A-Z])?)"', html)
+        if not raw_symbols:
+            logger.warning("stockanalysis.com: no symbols found in embedded data")
+            return None
+
+        # Deduplicate while preserving order
+        seen = set()
+        symbols = []
+        for s in raw_symbols:
+            if s not in seen:
+                seen.add(s)
+                symbols.append(_normalize_ticker(s))
+
+        if len(symbols) < 400:
+            logger.warning(
+                f"stockanalysis.com: only found {len(symbols)} symbols (expected ~500)"
+            )
+            return None
+
+        logger.info(f"Fetched {len(symbols)} S&P 500 symbols from stockanalysis.com")
+        return symbols
     except Exception as e:
-        logger.warning(f"Could not fetch S&P 500 symbols from web: {e}")
+        logger.warning(f"Could not fetch from stockanalysis.com: {e}")
+        return None
+
+
+def _fetch_slickcharts_sp500() -> list[str] | None:
+    """Fetch S&P 500 symbols from slickcharts.com."""
+    import urllib.request
+
+    try:
+        url = "https://www.slickcharts.com/sp500"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            html = response.read().decode("utf-8")
+
+        # SlickCharts links symbols as: <a href="/symbol/AAPL">AAPL</a>
+        raw_symbols = re.findall(r'href="/symbol/([A-Z]{1,5}(?:\.[A-Z])?)"', html)
+        if not raw_symbols:
+            logger.warning("slickcharts.com: no symbols found via href pattern")
+            return None
+
+        # Deduplicate while preserving order
+        seen = set()
+        symbols = []
+        for s in raw_symbols:
+            if s not in seen:
+                seen.add(s)
+                symbols.append(_normalize_ticker(s))
+
+        if len(symbols) < 400:
+            logger.warning(
+                f"slickcharts.com: only found {len(symbols)} symbols (expected ~500)"
+            )
+            return None
+
+        logger.info(f"Fetched {len(symbols)} S&P 500 symbols from slickcharts.com")
+        return symbols
+    except Exception as e:
+        logger.warning(f"Could not fetch from slickcharts.com: {e}")
         return None
 
 
@@ -889,9 +947,10 @@ def get_sp500_symbols() -> list[str]:
 
     Resolution order:
     1. File from SP500_SYMBOLS_FILE env var
-    2. Wikipedia S&P 500 list (normalized and validated against Tiingo)
-    3. Cached symbols file
-    4. Empty list with error
+    2. stockanalysis.com (embedded SvelteKit data)
+    3. slickcharts.com (href pattern)
+    4. Cached symbols file
+    5. Empty list with error
     """
     # 1. Try user-provided file
     symbols_file = os.getenv("SP500_SYMBOLS_FILE")
@@ -900,8 +959,8 @@ def get_sp500_symbols() -> list[str]:
         if result:
             return result
 
-    # 2. Fetch from Wikipedia and validate against Tiingo
-    symbols = _fetch_wikipedia_sp500()
+    # 2. Fetch from web sources (try each in order)
+    symbols = _fetch_stockanalysis_sp500() or _fetch_slickcharts_sp500()
     if symbols:
         tiingo_tickers = _fetch_tiingo_supported_tickers()
         if tiingo_tickers:
