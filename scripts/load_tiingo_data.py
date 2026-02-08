@@ -27,8 +27,12 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).parent.parent))
 
 from maverick_mcp.data.models import (
+    MaverickBearStocks,
+    MaverickStocks,
     Stock,
+    SupplyDemandBreakoutStocks,
     bulk_insert_price_data,
+    bulk_insert_screening_data,
 )
 
 # Configure logging
@@ -727,21 +731,25 @@ class TiingoDataLoader:
         """Store screening results in database."""
         with self.SessionLocal() as db_session:
             # Store Maverick results
-            for _data in results["maverick"]:
-                # Implementation would create MaverickStocks records
-                pass
+            if results["maverick"]:
+                maverick_count = bulk_insert_screening_data(
+                    db_session, MaverickStocks, results["maverick"]
+                )
+                logger.info(f"Stored {maverick_count} Maverick screening results")
 
             # Store Bear results
-            for _data in results["bear"]:
-                # Implementation would create MaverickBearStocks records
-                pass
+            if results["bear"]:
+                bear_count = bulk_insert_screening_data(
+                    db_session, MaverickBearStocks, results["bear"]
+                )
+                logger.info(f"Stored {bear_count} Bear screening results")
 
             # Store Supply/Demand results
-            for _data in results["supply_demand"]:
-                # Implementation would create SupplyDemandBreakoutStocks records
-                pass
-
-            db_session.commit()
+            if results["supply_demand"]:
+                breakout_count = bulk_insert_screening_data(
+                    db_session, SupplyDemandBreakoutStocks, results["supply_demand"]
+                )
+                logger.info(f"Stored {breakout_count} Supply/Demand screening results")
 
 
 def get_test_symbols() -> list[str]:

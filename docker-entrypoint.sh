@@ -6,6 +6,9 @@ set -e
 
 echo "=== MaverickMCP Container Starting ==="
 
+# Normalize API key env vars (different scripts expect different names)
+export TIINGO_API_TOKEN="${TIINGO_API_TOKEN:-$TIINGO_API_KEY}"
+
 # Function to wait for database
 wait_for_db() {
     echo "Checking database connection..."
@@ -100,10 +103,22 @@ seed_database() {
         return 0
     fi
 
+    # Build the seed command with proper arguments
+    build_seed_command() {
+        if [ "$SEED_MODE" == "tiingo" ]; then
+            # Tiingo loader needs explicit flags
+            echo "uv run python $SEED_SCRIPT --sp500 --calculate-indicators --run-screening --years ${TIINGO_YEARS:-2}"
+        else
+            echo "uv run python $SEED_SCRIPT"
+        fi
+    }
+
+    SEED_CMD=$(build_seed_command)
+
     # Force seed if FORCE_SEED is set
     if [ "${FORCE_SEED:-false}" == "true" ]; then
         echo "FORCE_SEED enabled, seeding database with $SEED_DESC..."
-        uv run python "$SEED_SCRIPT"
+        eval "$SEED_CMD"
         echo "Database seeded successfully"
         return 0
     fi
@@ -128,7 +143,7 @@ except Exception as e:
     fi
 
     echo "No screening data found, seeding database with $SEED_DESC..."
-    uv run python "$SEED_SCRIPT"
+    eval "$SEED_CMD"
     echo "Database seeded successfully"
 }
 
