@@ -789,66 +789,133 @@ def get_test_symbols() -> list[str]:
     ]
 
 
-def get_sp500_symbols() -> list[str]:
-    """Get S&P 500 symbols list from external source or file.
+def _fetch_tiingo_supported_tickers() -> set[str]:
+    """Fetch the set of supported tickers from Tiingo's API.
 
-    This function should load S&P 500 symbols from:
-    1. Environment variable SP500_SYMBOLS_FILE pointing to a file
-    2. Download from a public data source
-    3. Return empty list with warning if unavailable
+    Returns a set of uppercase ticker symbols that Tiingo has data for,
+    filtered to US stocks on NYSE/NASDAQ.
     """
-    # Try to load from file specified in environment
-    symbols_file = os.getenv("SP500_SYMBOLS_FILE")
-    if symbols_file and Path(symbols_file).exists():
-        try:
-            with open(symbols_file) as f:
-                symbols = [line.strip() for line in f if line.strip()]
-                logger.info(
-                    f"Loaded {len(symbols)} S&P 500 symbols from {symbols_file}"
-                )
-                return symbols
-        except Exception as e:
-            logger.warning(f"Could not load S&P 500 symbols from {symbols_file}: {e}")
+    import urllib.request
 
-    # Try to fetch from a public source (like Wikipedia or Yahoo Finance)
+    url = "https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.csv"
+    headers = {"Content-Type": "text/csv"}
+    if TIINGO_API_TOKEN:
+        headers["Authorization"] = f"Token {TIINGO_API_TOKEN}"
+
     try:
-        # Using pandas to read S&P 500 list from Wikipedia
-        import urllib.request
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            csv_data = response.read().decode("utf-8")
 
+        df = pd.read_csv(StringIO(csv_data))
+        # Filter to US stocks on major exchanges
+        mask = (
+            df["exchange"].isin(["NYSE", "NASDAQ"])
+            & (df["assetType"] == "Stock")
+            & (df["priceCurrency"] == "USD")
+        )
+        supported = set(df.loc[mask, "ticker"].str.upper())
+        logger.info(f"Fetched {len(supported)} supported tickers from Tiingo")
+        return supported
+    except Exception as e:
+        logger.warning(f"Could not fetch Tiingo supported tickers: {e}")
+        return set()
+
+
+def _normalize_ticker(symbol: str) -> str:
+    """Normalize ticker symbol for Tiingo compatibility.
+
+    Wikipedia uses dots (BRK.B, BF.B) while Tiingo uses dashes (BRK-B, BF-B).
+    """
+    return symbol.strip().upper().replace(".", "-")
+
+
+def _load_symbols_from_file(filepath: str) -> list[str] | None:
+    """Load symbols from a text file (one per line). Returns None on failure."""
+    try:
+        with open(filepath) as f:
+            symbols = [line.strip() for line in f if line.strip()]
+        logger.info(f"Loaded {len(symbols)} symbols from {filepath}")
+        return symbols
+    except Exception as e:
+        logger.warning(f"Could not load symbols from {filepath}: {e}")
+        return None
+
+
+def _fetch_wikipedia_sp500() -> list[str] | None:
+    """Fetch S&P 500 symbols from Wikipedia. Returns None on failure."""
+    import urllib.request
+
+    try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req) as response:
             html = response.read().decode("utf-8")
         tables = pd.read_html(StringIO(html))
-        sp500_table = tables[0]  # First table contains the S&P 500 list
-        symbols = sp500_table["Symbol"].tolist()
-        logger.info(f"Fetched {len(symbols)} S&P 500 symbols from Wikipedia")
-
-        # Optional: Save to cache file for future use
-        cache_file = os.getenv("SP500_CACHE_FILE", "sp500_symbols_cache.txt")
-        try:
-            with open(cache_file, "w") as f:
-                for symbol in symbols:
-                    f.write(f"{symbol}\n")
-            logger.info(f"Cached S&P 500 symbols to {cache_file}")
-        except Exception as e:
-            logger.debug(f"Could not cache symbols: {e}")
-
-        return symbols
-
+        raw_symbols = tables[0]["Symbol"].tolist()
+        logger.info(f"Fetched {len(raw_symbols)} S&P 500 symbols from Wikipedia")
+        return [_normalize_ticker(s) for s in raw_symbols]
     except Exception as e:
         logger.warning(f"Could not fetch S&P 500 symbols from web: {e}")
+        return None
 
-        # Try to load from cache if web fetch failed
-        cache_file = os.getenv("SP500_CACHE_FILE", "sp500_symbols_cache.txt")
-        if Path(cache_file).exists():
-            try:
-                with open(cache_file) as f:
-                    symbols = [line.strip() for line in f if line.strip()]
-                logger.info(f"Loaded {len(symbols)} S&P 500 symbols from cache")
-                return symbols
-            except Exception as e:
-                logger.warning(f"Could not load from cache: {e}")
+
+def _validate_against_tiingo(symbols: list[str], tiingo_tickers: set[str]) -> list[str]:
+    """Filter symbols to only those supported by Tiingo."""
+    valid = [s for s in symbols if s in tiingo_tickers]
+    dropped = [s for s in symbols if s not in tiingo_tickers]
+    if dropped:
+        logger.warning(
+            f"Dropped {len(dropped)} symbols not supported by Tiingo: "
+            f"{', '.join(sorted(dropped)[:20])}"
+            f"{'...' if len(dropped) > 20 else ''}"
+        )
+    return valid
+
+
+def _cache_symbols(symbols: list[str]) -> None:
+    """Save symbols to cache file for offline fallback."""
+    cache_file = os.getenv("SP500_CACHE_FILE", "sp500_symbols_cache.txt")
+    try:
+        with open(cache_file, "w") as f:
+            f.write("\n".join(symbols) + "\n")
+        logger.info(f"Cached {len(symbols)} symbols to {cache_file}")
+    except Exception as e:
+        logger.debug(f"Could not cache symbols: {e}")
+
+
+def get_sp500_symbols() -> list[str]:
+    """Get S&P 500 symbols list, validated against Tiingo's supported tickers.
+
+    Resolution order:
+    1. File from SP500_SYMBOLS_FILE env var
+    2. Wikipedia S&P 500 list (normalized and validated against Tiingo)
+    3. Cached symbols file
+    4. Empty list with error
+    """
+    # 1. Try user-provided file
+    symbols_file = os.getenv("SP500_SYMBOLS_FILE")
+    if symbols_file and Path(symbols_file).exists():
+        result = _load_symbols_from_file(symbols_file)
+        if result:
+            return result
+
+    # 2. Fetch from Wikipedia and validate against Tiingo
+    symbols = _fetch_wikipedia_sp500()
+    if symbols:
+        tiingo_tickers = _fetch_tiingo_supported_tickers()
+        if tiingo_tickers:
+            symbols = _validate_against_tiingo(symbols, tiingo_tickers)
+        logger.info(f"Using {len(symbols)} validated S&P 500 symbols")
+        _cache_symbols(symbols)
+        return symbols
+
+    # 3. Fall back to cache
+    cache_file = os.getenv("SP500_CACHE_FILE", "sp500_symbols_cache.txt")
+    if Path(cache_file).exists():
+        result = _load_symbols_from_file(cache_file)
+        if result:
+            return result
 
     logger.error("Unable to load S&P 500 symbols. Please specify --file or --symbols")
     return []
