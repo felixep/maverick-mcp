@@ -799,9 +799,9 @@ def _fetch_tiingo_supported_tickers() -> set[str]:
     import urllib.request
 
     url = "https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.csv"
-    headers = {"Content-Type": "text/csv"}
     if TIINGO_API_TOKEN:
-        headers["Authorization"] = f"Token {TIINGO_API_TOKEN}"
+        url += f"?token={TIINGO_API_TOKEN}"
+    headers = {"Content-Type": "text/csv"}
 
     try:
         req = urllib.request.Request(url, headers=headers)
