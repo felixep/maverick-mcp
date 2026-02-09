@@ -1682,6 +1682,21 @@ _SCREENING_FIELD_MAP = {
 }
 
 
+def _to_python_native(value):
+    """Convert numpy/pandas types to native Python types for DB insertion."""
+    import numpy as np
+
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
 def _build_screening_record_data(
     model_class, data: dict, date_analyzed: date
 ) -> dict:
@@ -1692,7 +1707,7 @@ def _build_screening_record_data(
             continue
         mapped_key = _SCREENING_FIELD_MAP.get(key, key)
         if hasattr(model_class, mapped_key):
-            record_data[mapped_key] = value
+            record_data[mapped_key] = _to_python_native(value)
     return record_data
 
 
