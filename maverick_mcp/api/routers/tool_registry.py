@@ -77,8 +77,11 @@ def register_screening_tools(mcp: FastMCP) -> None:
     """Register screening tools directly on main server"""
     from maverick_mcp.api.routers.screening import (
         get_all_screening_recommendations,
+        get_earnings_calendar,
+        get_market_regime,
         get_maverick_bear_stocks,
         get_maverick_stocks,
+        get_ranked_watchlist,
         get_screening_by_criteria,
         get_supply_demand_breakouts,
     )
@@ -90,6 +93,9 @@ def register_screening_tools(mcp: FastMCP) -> None:
         get_all_screening_recommendations
     )
     mcp.tool(name="screening_get_screening_by_criteria")(get_screening_by_criteria)
+    mcp.tool(name="screening_get_ranked_watchlist")(get_ranked_watchlist)
+    mcp.tool(name="data_get_earnings_calendar")(get_earnings_calendar)
+    mcp.tool(name="market_get_regime")(get_market_regime)
 
 
 def register_portfolio_tools(mcp: FastMCP) -> None:

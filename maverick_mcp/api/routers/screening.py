@@ -6,6 +6,7 @@ Maverick, supply/demand breakouts, and other screening strategies.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastmcp import FastMCP
@@ -236,3 +237,448 @@ def get_screening_by_criteria(
     except Exception as e:
         logger.error(f"Error in custom screening: {str(e)}")
         return {"error": str(e), "status": "error"}
+
+
+def _merge_candidate(
+    candidates: dict[str, dict[str, Any]],
+    ticker: str,
+    composite: float,
+    algorithm: str,
+    data: dict[str, Any],
+) -> None:
+    """Merge a screening candidate into the deduplicated candidates dict."""
+    if ticker not in candidates or composite > candidates[ticker]["composite_score"]:
+        candidates[ticker] = {
+            "ticker": ticker,
+            "composite_score": round(composite, 1),
+            "algorithms": [algorithm],
+            **data,
+        }
+    else:
+        if algorithm not in candidates[ticker]["algorithms"]:
+            candidates[ticker]["algorithms"].append(algorithm)
+        candidates[ticker]["composite_score"] = max(
+            candidates[ticker]["composite_score"], round(composite, 1)
+        )
+
+
+def _process_maverick_stocks(session, days_back: int, candidates: dict) -> tuple[int, Any]:
+    """Process Maverick bullish screening results into candidates."""
+    from maverick_mcp.data.models import MaverickStocks
+
+    stocks = MaverickStocks.get_latest_analysis(session, days_back=days_back)
+    screening_date = None
+
+    for stock in stocks:
+        ticker = stock.stock.ticker_symbol if stock.stock else None
+        if not ticker:
+            continue
+
+        combined = float(stock.combined_score or 0)
+        momentum = float(stock.momentum_score or 0)
+        composite = (combined / 8.0 * 100 * 0.6) + (momentum * 0.4)
+
+        _merge_candidate(candidates, ticker, composite, "maverick_bullish", {
+            "momentum_score": round(momentum, 1),
+            "combined_score": int(combined),
+            "close_price": float(stock.close_price or 0),
+        })
+
+        if stock.date_analyzed and (screening_date is None or stock.date_analyzed > screening_date):
+            screening_date = stock.date_analyzed
+
+    return len(stocks), screening_date
+
+
+def _process_supply_demand_stocks(session, days_back: int, candidates: dict) -> int:
+    """Process Supply/Demand breakout screening results into candidates."""
+    from maverick_mcp.data.models import SupplyDemandBreakoutStocks
+
+    stocks = SupplyDemandBreakoutStocks.get_top_stocks(session, limit=100)
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days_back)
+    count = 0
+
+    for stock in stocks:
+        ticker = stock.stock.ticker_symbol if stock.stock else None
+        if not ticker:
+            continue
+        if stock.date_analyzed and stock.date_analyzed < cutoff:
+            continue
+
+        count += 1
+        momentum = float(stock.momentum_score or 0)
+        accumulation = float(stock.accumulation_rating or 0)
+        breakout = float(stock.breakout_strength or 0)
+        composite = (momentum * 0.5) + (accumulation * 0.3) + (breakout * 20 * 0.2)
+
+        _merge_candidate(candidates, ticker, composite, "supply_demand_breakout", {
+            "momentum_score": round(momentum, 1),
+            "breakout_strength": round(breakout, 1),
+            "close_price": float(stock.close_price or 0),
+        })
+
+    return count
+
+
+def _process_bear_stocks(session, days_back: int, candidates: dict) -> int:
+    """Process Maverick Bear screening results into candidates."""
+    from maverick_mcp.data.models import MaverickBearStocks
+
+    stocks = MaverickBearStocks.get_latest_analysis(session, days_back=days_back)
+
+    for stock in stocks:
+        ticker = stock.stock.ticker_symbol if stock.stock else None
+        if not ticker:
+            continue
+
+        score = float(stock.score or 0)
+        momentum = float(stock.momentum_score or 0)
+        composite = (score * 0.6) + ((100 - momentum) * 0.4)
+
+        _merge_candidate(candidates, ticker, composite, "maverick_bearish", {
+            "momentum_score": round(momentum, 1),
+            "bear_score": int(score),
+            "close_price": float(stock.close_price or 0),
+        })
+
+    return len(stocks)
+
+
+def get_ranked_watchlist(
+    max_symbols: int | str = 10,
+    include_bearish: bool | str = False,
+    days_back: int | str = 3,
+) -> dict[str, Any]:
+    """
+    Get a ranked, deduplicated watchlist from all screening algorithms.
+
+    Queries Maverick bullish, Supply/Demand breakout, and optionally Bear
+    screening results, normalizes scores to 0-100, deduplicates by ticker,
+    and returns top N ranked candidates.
+
+    Args:
+        max_symbols: Maximum symbols to return (default: 10)
+        include_bearish: Whether to include bearish setups (default: False)
+        days_back: Days back to look for screening results (default: 3, handles weekends)
+
+    Returns:
+        Dictionary containing ranked watchlist with scores and algorithms
+    """
+    try:
+        max_symbols = int(max_symbols)
+        if isinstance(include_bearish, str):
+            include_bearish = include_bearish.lower() in ("true", "1", "yes")
+        days_back = int(days_back)
+
+        from maverick_mcp.data.models import SessionLocal
+
+        candidates: dict[str, dict[str, Any]] = {}
+        algorithms_queried = ["maverick_bullish", "supply_demand_breakout"]
+
+        with SessionLocal() as session:
+            maverick_count, screening_date = _process_maverick_stocks(
+                session, days_back, candidates
+            )
+            sd_count = _process_supply_demand_stocks(session, days_back, candidates)
+
+            bear_count = 0
+            if include_bearish:
+                algorithms_queried.append("maverick_bearish")
+                bear_count = _process_bear_stocks(session, days_back, candidates)
+
+        total_candidates = maverick_count + sd_count + bear_count
+
+        ranked = sorted(
+            candidates.values(),
+            key=lambda x: x["composite_score"],
+            reverse=True,
+        )[:max_symbols]
+
+        for i, item in enumerate(ranked):
+            item["rank"] = i + 1
+
+        return {
+            "status": "success",
+            "watchlist": ranked,
+            "total_candidates": total_candidates,
+            "algorithms_queried": algorithms_queried,
+            "screening_date": screening_date.isoformat() if screening_date else None,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting ranked watchlist: {e}")
+        return {"error": str(e), "status": "error"}
+
+
+# ---------------------------------------------------------------------------
+# Market Regime Detection
+# ---------------------------------------------------------------------------
+
+
+def _fetch_spy_metrics() -> dict[str, Any]:
+    """Fetch SPY price, 200 SMA, SMA slope, and 52-week high via yfinance."""
+    import yfinance as yf
+
+    spy = yf.Ticker("SPY")
+    hist = spy.history(period="1y")
+
+    if hist.empty:
+        return {"error": "No SPY data"}
+
+    current_price = float(hist["Close"].iloc[-1])
+    sma_200 = float(hist["Close"].rolling(200).mean().dropna().iloc[-1]) if len(hist) >= 200 else current_price
+    # SMA slope: compare current SMA to SMA 22 trading days ago
+    sma_series = hist["Close"].rolling(200).mean().dropna()
+    if len(sma_series) >= 22:
+        sma_slope = float(sma_series.iloc[-1] - sma_series.iloc[-22])
+    else:
+        sma_slope = 0.0
+    high_52w = float(hist["Close"].max())
+    pct_from_high = ((current_price - high_52w) / high_52w) * 100
+
+    return {
+        "price": round(current_price, 2),
+        "sma_200": round(sma_200, 2),
+        "sma_rising": sma_slope > 0,
+        "high_52w": round(high_52w, 2),
+        "pct_from_high": round(pct_from_high, 1),
+    }
+
+
+def _fetch_vix() -> float:
+    """Fetch current VIX value via yfinance."""
+    import yfinance as yf
+
+    try:
+        vix = yf.Ticker("^VIX")
+        hist = vix.history(period="5d")
+        if not hist.empty:
+            return round(float(hist["Close"].iloc[-1]), 2)
+    except Exception:
+        pass
+    return 20.0  # long-term average fallback
+
+
+def _calculate_breadth() -> float:
+    """Calculate breadth proxy: bullish / (bullish + bearish) from screening tables."""
+    from maverick_mcp.data.models import MaverickBearStocks, MaverickStocks, SessionLocal
+
+    with SessionLocal() as session:
+        bullish = MaverickStocks.get_latest_analysis(session, days_back=3)
+        bearish = MaverickBearStocks.get_latest_analysis(session, days_back=3)
+
+    bull_count = len(bullish)
+    bear_count = len(bearish)
+    total = bull_count + bear_count
+    if total == 0:
+        return 50.0
+    return round((bull_count / total) * 100, 1)
+
+
+def _classify_regime(
+    spy_above_sma: bool,
+    sma_rising: bool,
+    pct_from_high: float,
+    vix: float,
+    breadth: float,
+) -> tuple[str, float, dict[str, Any]]:
+    """Classify market regime from indicators. Returns (regime, confidence, guidance)."""
+    # CORRECTION: SPY down >10% from 52w high AND VIX > 25
+    if pct_from_high < -10 and vix > 25:
+        return "CORRECTION", 0.9, {
+            "position_size_multiplier": 0.25,
+            "allow_new_longs": False,
+            "allow_new_shorts": True,
+        }
+
+    # STRONG_BEAR: below SMA, SMA falling, low breadth, high VIX
+    if not spy_above_sma and not sma_rising and breadth < 30 and vix > 25:
+        return "STRONG_BEAR", 0.85, {
+            "position_size_multiplier": 0.25,
+            "allow_new_longs": False,
+            "allow_new_shorts": True,
+        }
+
+    # BEAR: below SMA, low breadth
+    if not spy_above_sma and breadth < 40:
+        return "BEAR", 0.75, {
+            "position_size_multiplier": 0.5,
+            "allow_new_longs": False,
+            "allow_new_shorts": True,
+        }
+
+    # STRONG_BULL: above SMA, SMA rising, high breadth, low VIX
+    if spy_above_sma and sma_rising and breadth > 60 and vix < 18:
+        return "STRONG_BULL", 0.85, {
+            "position_size_multiplier": 1.0,
+            "allow_new_longs": True,
+            "allow_new_shorts": False,
+        }
+
+    # BULL: above SMA, decent breadth
+    if spy_above_sma and breadth > 50:
+        return "BULL", 0.7, {
+            "position_size_multiplier": 1.0,
+            "allow_new_longs": True,
+            "allow_new_shorts": False,
+        }
+
+    # NEUTRAL: everything else
+    return "NEUTRAL", 0.5, {
+        "position_size_multiplier": 0.75,
+        "allow_new_longs": True,
+        "allow_new_shorts": False,
+    }
+
+
+def get_market_regime() -> dict[str, Any]:
+    """Detect current market regime using SPY technicals, VIX, and screening breadth.
+
+    Returns regime classification with strategy guidance for position sizing
+    and directional bias. Uses deterministic thresholds (no ML).
+
+    Regimes: STRONG_BULL, BULL, NEUTRAL, BEAR, STRONG_BEAR, CORRECTION
+
+    Returns:
+        Dictionary with regime, confidence, indicators, and strategy_guidance
+    """
+    try:
+        spy = _fetch_spy_metrics()
+        if "error" in spy:
+            return _default_regime(spy["error"])
+
+        vix = _fetch_vix()
+        breadth = _calculate_breadth()
+
+        spy_above_sma = spy["price"] > spy["sma_200"]
+        regime, confidence, guidance = _classify_regime(
+            spy_above_sma=spy_above_sma,
+            sma_rising=spy["sma_rising"],
+            pct_from_high=spy["pct_from_high"],
+            vix=vix,
+            breadth=breadth,
+        )
+
+        return {
+            "status": "success",
+            "regime": regime,
+            "confidence": confidence,
+            "spy_price": spy["price"],
+            "spy_sma_200": spy["sma_200"],
+            "spy_above_sma": spy_above_sma,
+            "sma_rising": spy["sma_rising"],
+            "pct_from_52w_high": spy["pct_from_high"],
+            "vix": vix,
+            "breadth_pct": breadth,
+            "strategy_guidance": guidance,
+        }
+
+    except Exception as e:
+        logger.error(f"Error detecting market regime: {e}")
+        return _default_regime(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Earnings Calendar
+# ---------------------------------------------------------------------------
+
+
+_NO_EARNINGS: dict[str, None] = {"next_earnings": None, "days_until": None}
+_EARNINGS_DATE_KEY = "Earnings Date"
+
+
+def _extract_earnings_date(cal: Any) -> Any:
+    """Extract the raw earnings date from a yfinance calendar (dict or DataFrame)."""
+    if isinstance(cal, dict):
+        val = cal.get(_EARNINGS_DATE_KEY)
+        if isinstance(val, list) and val:
+            return val[0]
+        return val
+
+    # DataFrame format
+    if hasattr(cal, "loc") and _EARNINGS_DATE_KEY in cal.index:
+        val = cal.loc[_EARNINGS_DATE_KEY]
+        return val.iloc[0] if hasattr(val, "iloc") else val
+
+    return None
+
+
+def _normalize_earnings_date(raw_date: Any, today) -> dict[str, Any]:
+    """Normalize a raw earnings date to {next_earnings, days_until}."""
+    if raw_date is None:
+        return dict(_NO_EARNINGS)
+
+    if hasattr(raw_date, "date"):
+        raw_date = raw_date.date()
+    elif isinstance(raw_date, str):
+        raw_date = datetime.fromisoformat(raw_date).date()
+
+    days_until = (raw_date - today).days
+    if days_until < 0:
+        return dict(_NO_EARNINGS)
+
+    return {"next_earnings": raw_date.isoformat(), "days_until": days_until}
+
+
+def get_earnings_calendar(tickers: list[str] | str) -> dict[str, Any]:
+    """Get next earnings dates for a list of tickers.
+
+    Uses yfinance to look up the next earnings date for each ticker.
+    Useful for avoiding entries right before earnings announcements.
+
+    Args:
+        tickers: List of ticker symbols, or comma-separated string
+
+    Returns:
+        Dictionary mapping ticker to earnings info (next_earnings date, days_until)
+    """
+    import yfinance as yf
+
+    if isinstance(tickers, str):
+        tickers = [t.strip() for t in tickers.split(",") if t.strip()]
+
+    results: dict[str, dict[str, Any]] = {}
+    today = datetime.now(timezone.utc).date()
+
+    for ticker in tickers:
+        try:
+            stock = yf.Ticker(ticker)
+            cal = stock.calendar
+            if cal is None or (hasattr(cal, "empty") and cal.empty):
+                results[ticker] = dict(_NO_EARNINGS)
+                continue
+
+            raw_date = _extract_earnings_date(cal)
+            results[ticker] = _normalize_earnings_date(raw_date, today)
+
+        except Exception as e:
+            logger.warning(f"Failed to get earnings for {ticker}: {e}")
+            results[ticker] = dict(_NO_EARNINGS)
+
+    return {
+        "status": "success",
+        "earnings": results,
+        "tickers_checked": len(tickers),
+    }
+
+
+def _default_regime(error: str = "") -> dict[str, Any]:
+    """Return a safe NEUTRAL default when regime detection fails."""
+    return {
+        "status": "error" if error else "success",
+        "regime": "NEUTRAL",
+        "confidence": 0.0,
+        "spy_price": 0.0,
+        "spy_sma_200": 0.0,
+        "spy_above_sma": True,
+        "sma_rising": True,
+        "pct_from_52w_high": 0.0,
+        "vix": 20.0,
+        "breadth_pct": 50.0,
+        "strategy_guidance": {
+            "position_size_multiplier": 0.75,
+            "allow_new_longs": True,
+            "allow_new_shorts": False,
+        },
+        "error": error,
+    }
