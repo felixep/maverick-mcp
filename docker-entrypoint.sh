@@ -9,6 +9,12 @@ echo "=== MaverickMCP Container Starting ==="
 # Normalize API key env vars (different scripts expect different names)
 export TIINGO_API_TOKEN="${TIINGO_API_TOKEN:-$TIINGO_API_KEY}"
 
+# Default pool sizes that fit within PostgreSQL Alpine's max_connections=20
+# Settings reads DB_POOL_SIZE + DB_POOL_MAX_OVERFLOW; DatabasePoolConfig reads DB_MAX_OVERFLOW
+export DB_POOL_SIZE="${DB_POOL_SIZE:-5}"
+export DB_MAX_OVERFLOW="${DB_MAX_OVERFLOW:-3}"
+export DB_POOL_MAX_OVERFLOW="${DB_POOL_MAX_OVERFLOW:-$DB_MAX_OVERFLOW}"
+
 # Debug: show database URL (mask password)
 echo "DATABASE_URL: $(echo "$DATABASE_URL" | sed -E 's|(://[^:]+:)[^@]+(@)|\1****\2|')"
 
