@@ -6,7 +6,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/maverick_mcp
       - REDIS_HOST=redis
-      # Required API Keys
+      # Market Data API Keys (Alpaca primary, Tiingo fallback)
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - ALPACA_PAPER=${ALPACA_PAPER:-true}
       - TIINGO_API_KEY=${TIINGO_API_KEY}
       # Optional API Keys for Enhanced Features
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}

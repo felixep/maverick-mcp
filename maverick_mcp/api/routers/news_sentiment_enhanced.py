@@ -46,6 +46,47 @@ def get_llm():
     )
 
 
+async def _fetch_alpaca_news(
+    ticker: str, timeframe: str = "7d", limit: int = 10
+) -> list[dict]:
+    """Fetch news from Alpaca's free News API (Benzinga-powered).
+
+    Returns articles in the same format as Tiingo: {title, description, publishedDate, source}.
+    """
+    from alpaca.data.historical.news import NewsClient
+    from alpaca.data.requests import NewsRequest
+
+    end_date = datetime.now()
+    days = int(timeframe.rstrip("d")) if timeframe.endswith("d") else 7
+    start_date = end_date - timedelta(days=days)
+
+    client = NewsClient()  # No API key required for news
+    request = NewsRequest(
+        symbols=ticker,
+        start=start_date,
+        end=end_date,
+        limit=min(limit, 50),
+        sort="desc",
+        include_content=True,
+    )
+
+    news = await asyncio.to_thread(client.get_news, request)
+
+    articles = []
+    for article in news.news:
+        articles.append(
+            {
+                "title": article.headline,
+                "description": article.summary or "",
+                "publishedDate": article.created_at.isoformat()
+                if article.created_at
+                else "",
+                "source": article.source or "Benzinga",
+            }
+        )
+    return articles
+
+
 async def get_news_sentiment_enhanced(
     ticker: str, timeframe: str = "7d", limit: int = 10
 ) -> dict[str, Any]:
@@ -70,7 +111,42 @@ async def get_news_sentiment_enhanced(
     request_id = str(uuid.uuid4())
 
     try:
-        # Step 1: Try Tiingo News API
+        # Step 1: Try Alpaca News API (free tier, no paid plan needed)
+        tool_logger.step("alpaca_check", f"Checking Alpaca News API for {ticker}")
+
+        try:
+            alpaca_articles = await _fetch_alpaca_news(ticker, timeframe, limit)
+            if alpaca_articles:
+                tool_logger.step(
+                    "alpaca_llm_analysis",
+                    f"Analyzing {len(alpaca_articles)} Alpaca articles with LLM",
+                )
+                sentiment_result = await _analyze_news_sentiment_with_llm(
+                    alpaca_articles, ticker, tool_logger
+                )
+                tool_logger.complete(
+                    f"Alpaca news sentiment analysis completed for {ticker}"
+                )
+                return {
+                    "ticker": ticker,
+                    "sentiment": sentiment_result["overall_sentiment"],
+                    "confidence": sentiment_result["confidence"],
+                    "source": "alpaca_news_with_llm_analysis",
+                    "status": "success",
+                    "analysis": {
+                        "articles_analyzed": len(alpaca_articles),
+                        "sentiment_breakdown": sentiment_result["breakdown"],
+                        "key_themes": sentiment_result["themes"],
+                        "recent_headlines": sentiment_result["headlines"][:3],
+                    },
+                    "timeframe": timeframe,
+                    "request_id": request_id,
+                    "timestamp": datetime.now().isoformat(),
+                }
+        except Exception as e:
+            tool_logger.step("alpaca_fallback", f"Alpaca news unavailable: {e}")
+
+        # Step 2: Try Tiingo News API
         tool_logger.step("tiingo_check", f"Checking Tiingo News API for {ticker}")
 
         tiingo_client = get_tiingo_client()

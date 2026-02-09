@@ -9,6 +9,11 @@ echo "=== MaverickMCP Container Starting ==="
 # Normalize API key env vars (different scripts expect different names)
 export TIINGO_API_TOKEN="${TIINGO_API_TOKEN:-$TIINGO_API_KEY}"
 
+# Alpaca API (primary data provider)
+export ALPACA_API_KEY="${ALPACA_API_KEY}"
+export ALPACA_SECRET_KEY="${ALPACA_SECRET_KEY:-$ALPACA_API_SECRET}"
+export ALPACA_PAPER="${ALPACA_PAPER:-true}"
+
 # Default pool sizes that fit within PostgreSQL Alpine's max_connections=20
 # Settings reads DB_POOL_SIZE + DB_POOL_MAX_OVERFLOW; DatabasePoolConfig reads DB_MAX_OVERFLOW
 export DB_POOL_SIZE="${DB_POOL_SIZE:-5}"
@@ -99,9 +104,15 @@ seed_database() {
             SEED_SCRIPT="scripts/seed_sp500.py"
             SEED_DESC="S&P 500 stocks"
             ;;
-        tiingo)
-            SEED_SCRIPT="scripts/load_tiingo_data.py"
-            SEED_DESC="Tiingo market data"
+        tiingo|alpaca)
+            # Prefer Alpaca (200 req/min) over Tiingo (~50/hour)
+            if [ -n "$ALPACA_API_KEY" ] && [ -n "$ALPACA_SECRET_KEY" ] && [ -f "scripts/load_alpaca_data.py" ]; then
+                SEED_SCRIPT="scripts/load_alpaca_data.py"
+                SEED_DESC="Alpaca market data (primary)"
+            else
+                SEED_SCRIPT="scripts/load_tiingo_data.py"
+                SEED_DESC="Tiingo market data (fallback)"
+            fi
             ;;
         *)
             SEED_SCRIPT="scripts/seed_db.py"
@@ -117,8 +128,8 @@ seed_database() {
 
     # Build the seed command with proper arguments
     build_seed_command() {
-        if [ "$SEED_MODE" == "tiingo" ]; then
-            # Tiingo loader needs explicit flags
+        if [ "$SEED_MODE" == "tiingo" ] || [ "$SEED_MODE" == "alpaca" ]; then
+            # Both Alpaca and Tiingo loaders use the same CLI flags
             echo "uv run python $SEED_SCRIPT --sp500 --calculate-indicators --run-screening --years ${TIINGO_YEARS:-2}"
         else
             echo "uv run python $SEED_SCRIPT"

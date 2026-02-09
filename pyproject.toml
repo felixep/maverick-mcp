@@ -64,6 +64,7 @@ dependencies = [
     "pandas-datareader>=0.10.0",
     "pandas-market-calendars>=5.1.0",
     "tiingo>=0.16.1",
+    "alpaca-py>=0.35.0",
     # Visualization (essential only)
     "matplotlib>=3.10.3",
     "plotly>=5.0.0",
