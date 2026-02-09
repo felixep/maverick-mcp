@@ -32,6 +32,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     create_engine,
+    func,
     inspect,
 )
 from sqlalchemy.exc import SQLAlchemyError
@@ -1601,6 +1602,45 @@ def bulk_insert_price_data(
             f"All {len(df)} records already exist in cache for {ticker_symbol}"
         )
         return 0
+
+
+def get_latest_price_date(
+    session: Session, ticker_symbol: str
+) -> "date | None":
+    """Return the most recent price date for a ticker, or None if no data.
+
+    Used by the Tiingo loader to decide whether a symbol needs refreshing.
+    """
+    stock = (
+        session.query(Stock)
+        .filter_by(ticker_symbol=ticker_symbol.upper())
+        .first()
+    )
+    if not stock:
+        return None
+    return session.query(func.max(PriceCache.date)).filter(
+        PriceCache.stock_id == stock.stock_id
+    ).scalar()
+
+
+def get_latest_price_dates(
+    session: Session, ticker_symbols: list[str]
+) -> dict[str, "date"]:
+    """Return {ticker: latest_date} for all tickers with price data.
+
+    Single query for efficiency — avoids N individual lookups when the
+    Tiingo loader checks 500+ symbols.
+    """
+    if not ticker_symbols:
+        return {}
+    rows = (
+        session.query(Stock.ticker_symbol, func.max(PriceCache.date))
+        .join(PriceCache, Stock.stock_id == PriceCache.stock_id)
+        .filter(Stock.ticker_symbol.in_([t.upper() for t in ticker_symbols]))
+        .group_by(Stock.ticker_symbol)
+        .all()
+    )
+    return dict(rows)
 
 
 def get_latest_maverick_screening(days_back: int = 1) -> dict:

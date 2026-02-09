@@ -149,7 +149,28 @@ except Exception as e:
         return 0
     fi
 
-    echo "No screening data found, seeding database with $SEED_DESC..."
+    # Check if we already have price data (survives reboots via upsert)
+    PRICE_COUNT=$(uv run python -c "
+from sqlalchemy import create_engine, text
+import os
+try:
+    engine = create_engine(os.environ.get('DATABASE_URL', 'sqlite:///maverick_mcp.db'))
+    with engine.connect() as conn:
+        result = conn.execute(text('SELECT COUNT(*) FROM mcp_price_cache'))
+        print(result.scalar())
+except Exception:
+    print('0')
+" 2>/dev/null || echo "0")
+
+    if [ "$PRICE_COUNT" -gt "10000" ]; then
+        echo "Price data exists ($PRICE_COUNT records) but screening is empty."
+        echo "Running screening only (skipping Tiingo download)..."
+        run_full_screening
+        echo "Screening completed"
+        return 0
+    fi
+
+    echo "No data found, seeding database with $SEED_DESC..."
     eval "$SEED_CMD"
     run_full_screening
     echo "Database seeded successfully"

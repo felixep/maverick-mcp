@@ -31,10 +31,13 @@ sys.path.append(str(Path(__file__).parent.parent))
 from maverick_mcp.data.models import (
     MaverickBearStocks,
     MaverickStocks,
+    PriceCache,
     Stock,
     SupplyDemandBreakoutStocks,
     bulk_insert_price_data,
     bulk_insert_screening_data,
+    get_latest_price_date,
+    get_latest_price_dates,
 )
 
 # Configure logging
@@ -118,6 +121,9 @@ class TiingoDataLoader:
         # Checkpoint configuration
         self.checkpoint_file = checkpoint_file or DEFAULT_CHECKPOINT_FILE
         self.checkpoint_data = self.load_checkpoint()
+
+        # Pre-loaded latest dates per symbol (populated by load_symbols)
+        self._latest_dates: dict[str, Any] = {}
 
         # Session configuration (following tiingo-python)
         self._session = None
@@ -595,6 +601,89 @@ class TiingoDataLoader:
 
         return None
 
+    def _load_price_df_from_db(self, symbol: str) -> pd.DataFrame:
+        """Load price history from the database and return a DataFrame.
+
+        Columns are capitalised (Open, High, Low, Close, Volume) to match
+        the format produced by ``_process_dataframe`` / Tiingo API so that
+        ``calculate_technical_indicators`` and the screening methods work
+        without changes.
+        """
+        with self.SessionLocal() as db_session:
+            # Use a wide date range to get all stored data
+            df = PriceCache.get_price_data(db_session, symbol, start_date="2000-01-01")
+        if df.empty:
+            return df
+        # get_price_data returns lowercase cols; screening expects capitalised
+        df = df.rename(columns={
+            "open": "Open", "high": "High", "low": "Low",
+            "close": "Close", "volume": "Volume",
+        })
+        # Drop helper column added by get_price_data
+        df = df.drop(columns=["symbol"], errors="ignore")
+        return df
+
+    def _run_screening_on_df(self, df: pd.DataFrame, symbol: str) -> dict:
+        """Calculate indicators and run all three screening algorithms."""
+        if df.empty or len(df) < 200:
+            return {}
+        df = self.calculate_technical_indicators(df)
+        results: dict = {}
+        mav = self.run_maverick_screening(df, symbol)
+        if mav:
+            results["maverick"] = mav
+        bear = self.run_bear_screening(df, symbol)
+        if bear:
+            results["bear"] = bear
+        sd = self.run_supply_demand_screening(df, symbol)
+        if sd:
+            results["supply_demand"] = sd
+        return results
+
+    def _resolve_fetch_range(
+        self, symbol: str, start_date: str, end_date: str
+    ) -> tuple[str | None, bool]:
+        """Decide what date range (if any) to fetch from Tiingo.
+
+        Returns:
+            (effective_start_date, is_fresh) — *None* start means skip the
+            API call entirely because the DB data is already fresh.
+        """
+        latest_date = self._latest_dates.get(symbol)
+        if not latest_date:
+            return start_date, False
+
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        days_stale = (end_dt - latest_date).days
+
+        if days_stale <= 3:
+            logger.info(f"Skipping {symbol} — data current through {latest_date}")
+            return None, True
+
+        incremental_start = (latest_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        logger.info(
+            f"{symbol}: fetching {incremental_start} to {end_date} "
+            f"(have data through {latest_date})"
+        )
+        return incremental_start, False
+
+    async def _fetch_and_store(
+        self,
+        session: aiohttp.ClientSession,
+        symbol: str,
+        fetch_start: str,
+        end_date: str,
+    ) -> bool:
+        """Fetch price data from Tiingo and store in DB. Returns True if data was saved."""
+        df = await self.get_daily_price_history(session, symbol, fetch_start, end_date)
+        if df is None or df.empty:
+            return False
+        with self.SessionLocal() as db_session:
+            Stock.get_or_create(db_session, symbol)
+            records_inserted = bulk_insert_price_data(db_session, symbol, df)
+            logger.info(f"Inserted {records_inserted} records for {symbol}")
+        return True
+
     async def process_symbol(
         self,
         session: aiohttp.ClientSession,
@@ -604,55 +693,40 @@ class TiingoDataLoader:
         calculate_indicators: bool = True,
         run_screening: bool = True,
     ) -> tuple[bool, dict | None]:
-        """Process a single symbol - fetch data, calculate indicators, run screening."""
+        """Process a single symbol - fetch data, calculate indicators, run screening.
+
+        Checks the database first to avoid unnecessary Tiingo API calls:
+        - If data is fresh (within 3 days), skip the API call entirely.
+        - If data exists but is stale, only fetch the gap (incremental).
+        - If no data exists, fetch the full date range.
+        """
         try:
-            # Skip if already processed
+            # Skip if already processed (checkpoint from current run)
             if symbol in self.checkpoint_data.get("completed_symbols", []):
                 logger.info(f"Skipping {symbol} - already processed")
                 return True, None
 
-            # Fetch historical data using tiingo-python pattern
-            df = await self.get_daily_price_history(
-                session, symbol, start_date, end_date
+            fetch_start, _ = self._resolve_fetch_range(
+                symbol, start_date, end_date
             )
 
-            if df.empty:
-                logger.warning(f"No data available for {symbol}")
-                return False, None
+            # Fetch from Tiingo unless DB data is already fresh
+            if fetch_start is not None:
+                stored = await self._fetch_and_store(
+                    session, symbol, fetch_start, end_date
+                )
+                if not stored and symbol not in self._latest_dates:
+                    logger.warning(f"No data available for {symbol}")
+                    return False, None
 
-            # Store in database
-            with self.SessionLocal() as db_session:
-                # Create or get stock record
-                Stock.get_or_create(db_session, symbol)
+            # Run screening on the full DB history
+            screening_results: dict = {}
+            if calculate_indicators and run_screening:
+                full_df = self._load_price_df_from_db(symbol)
+                screening_results = self._run_screening_on_df(full_df, symbol)
 
-                # Bulk insert price data
-                records_inserted = bulk_insert_price_data(db_session, symbol, df)
-                logger.info(f"Inserted {records_inserted} records for {symbol}")
-
-            screening_results = {}
-
-            if calculate_indicators:
-                # Calculate technical indicators
-                df = self.calculate_technical_indicators(df)
-
-                if run_screening:
-                    # Run screening algorithms
-                    maverick_result = self.run_maverick_screening(df, symbol)
-                    if maverick_result:
-                        screening_results["maverick"] = maverick_result
-
-                    bear_result = self.run_bear_screening(df, symbol)
-                    if bear_result:
-                        screening_results["bear"] = bear_result
-
-                    supply_demand_result = self.run_supply_demand_screening(df, symbol)
-                    if supply_demand_result:
-                        screening_results["supply_demand"] = supply_demand_result
-
-            # Save checkpoint
             self.save_checkpoint(symbol)
-
-            return True, screening_results
+            return True, screening_results or None
 
         except Exception as e:
             logger.error(f"Error processing {symbol}: {e}")
@@ -670,6 +744,22 @@ class TiingoDataLoader:
         """Load data for multiple symbols with concurrent processing."""
         logger.info(
             f"Loading data for {len(symbols)} symbols from {start_date} to {end_date}"
+        )
+
+        # Pre-load existing data dates in a single DB query
+        with self.SessionLocal() as db_session:
+            self._latest_dates = get_latest_price_dates(db_session, symbols)
+
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        up_to_date = sum(
+            1 for s in symbols
+            if s in self._latest_dates
+            and (end_dt - self._latest_dates[s]).days <= 3
+        )
+        need_fetch = len(symbols) - up_to_date
+        logger.info(
+            f"Data check: {up_to_date}/{len(symbols)} symbols already up-to-date, "
+            f"{need_fetch} need API calls"
         )
 
         # Filter out already processed symbols if resuming
