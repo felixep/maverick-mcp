@@ -753,6 +753,7 @@ def get_sp500_symbols() -> list[str]:
 
 
 def main():
+    global BATCH_SIZE
     parser = argparse.ArgumentParser(
         description="Load market data from Alpaca API (primary provider)"
     )
@@ -807,7 +808,6 @@ def main():
     ).strftime("%Y-%m-%d")
 
     # Override global batch size
-    global BATCH_SIZE
     BATCH_SIZE = args.batch_size
 
     loader = AlpacaDataLoader(db_url=db_url)
