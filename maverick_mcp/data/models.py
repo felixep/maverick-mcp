@@ -1630,6 +1630,32 @@ def get_latest_maverick_screening(days_back: int = 1) -> dict:
     return results
 
 
+_SCREENING_FIELD_MAP = {
+    "open": "open_price",
+    "high": "high_price",
+    "low": "low_price",
+    "close": "close_price",
+    "pat": "pattern_type",
+    "sqz": "squeeze_status",
+    "vcp": "consolidation_status",
+    "entry": "entry_signal",
+}
+
+
+def _build_screening_record_data(
+    model_class, data: dict, date_analyzed: date
+) -> dict:
+    """Build a dict of mapped field values for a screening record."""
+    record_data: dict = {"date_analyzed": date_analyzed}
+    for key, value in data.items():
+        if key in ("ticker", "symbol"):
+            continue
+        mapped_key = _SCREENING_FIELD_MAP.get(key, key)
+        if hasattr(model_class, mapped_key):
+            record_data[mapped_key] = value
+    return record_data
+
+
 def bulk_insert_screening_data(
     session: Session,
     model_class,
@@ -1637,7 +1663,12 @@ def bulk_insert_screening_data(
     date_analyzed: date | None = None,
 ) -> int:
     """
-    Bulk insert screening data for any screening model.
+    Upsert screening data for any screening model.
+
+    For each record, updates the existing row (matched by stock_id +
+    date_analyzed) or inserts a new one. This prevents data loss if
+    the process is interrupted — old data is only overwritten when new
+    data is successfully provided.
 
     Args:
         session: Database session
@@ -1646,7 +1677,7 @@ def bulk_insert_screening_data(
         date_analyzed: Date of analysis (default: today)
 
     Returns:
-        Number of records inserted
+        Number of records upserted
     """
     if not screening_data:
         return 0
@@ -1654,12 +1685,7 @@ def bulk_insert_screening_data(
     if date_analyzed is None:
         date_analyzed = datetime.now(UTC).date()
 
-    # Remove existing data for this date
-    session.query(model_class).filter(
-        model_class.date_analyzed == date_analyzed
-    ).delete()
-
-    inserted_count = 0
+    upserted_count = 0
     for data in screening_data:
         # Get or create stock
         ticker = data.get("ticker") or data.get("symbol")
@@ -1667,38 +1693,31 @@ def bulk_insert_screening_data(
             continue
 
         stock = Stock.get_or_create(session, ticker)
+        record_data = _build_screening_record_data(
+            model_class, data, date_analyzed
+        )
 
-        # Create screening record
-        record_data = {
-            "stock_id": stock.stock_id,
-            "date_analyzed": date_analyzed,
-        }
+        # Upsert: update existing record or insert new one
+        existing = (
+            session.query(model_class)
+            .filter(
+                model_class.stock_id == stock.stock_id,
+                model_class.date_analyzed == date_analyzed,
+            )
+            .first()
+        )
 
-        # Map common fields
-        field_mapping = {
-            "open": "open_price",
-            "high": "high_price",
-            "low": "low_price",
-            "close": "close_price",
-            "pat": "pattern_type",
-            "sqz": "squeeze_status",
-            "vcp": "consolidation_status",
-            "entry": "entry_signal",
-        }
+        if existing:
+            for key, value in record_data.items():
+                setattr(existing, key, value)
+        else:
+            record_data["stock_id"] = stock.stock_id
+            session.add(model_class(**record_data))
 
-        for key, value in data.items():
-            if key in ["ticker", "symbol"]:
-                continue
-            mapped_key = field_mapping.get(key, key)
-            if hasattr(model_class, mapped_key):
-                record_data[mapped_key] = value
-
-        record = model_class(**record_data)
-        session.add(record)
-        inserted_count += 1
+        upserted_count += 1
 
     session.commit()
-    return inserted_count
+    return upserted_count
 
 
 # ============================================================================
