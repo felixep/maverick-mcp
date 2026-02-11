@@ -143,7 +143,7 @@ async def _execute_technical_analysis_with_logging(
     try:
         df = await asyncio.wait_for(
             get_stock_dataframe_async(ticker, days),
-            timeout=10.0,  # Alpaca batch API is fast; no yfinance throttling
+            timeout=15.0,  # Alpaca is fast, but cache gap-fill may add latency
         )
 
         if df.empty:
@@ -153,7 +153,7 @@ async def _execute_technical_analysis_with_logging(
         tool_logger.step("data_validation", f"Retrieved {len(df)} data points")
 
     except TimeoutError:
-        raise TechnicalAnalysisError(f"Data fetch for {ticker} timed out")
+        raise TechnicalAnalysisError(f"Data fetch for {ticker} timed out (15s)")
     except Exception as e:
         raise TechnicalAnalysisError(f"Failed to fetch data for {ticker}: {str(e)}")
 

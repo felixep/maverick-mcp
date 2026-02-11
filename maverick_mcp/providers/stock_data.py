@@ -570,11 +570,24 @@ class EnhancedStockDataProvider:
         if end_date is None:
             end_date = datetime.now(UTC).strftime("%Y-%m-%d")
 
-        # For daily data, adjust end date to last trading day if it's not a trading day
-        # This prevents unnecessary cache misses on weekends/holidays
+        # For daily data, adjust end date to avoid requesting bars that don't exist yet.
+        # Daily bars are only available after market close (~16:00 ET / 21:00 UTC).
+        # Requesting today's date when bars aren't ready triggers a futile
+        # Alpaca→empty→yfinance→empty fallback chain that wastes the timeout budget.
         if interval == "1d" and use_cache:
             end_dt = pd.to_datetime(end_date)
-            if not self._is_trading_day(end_dt):
+            now_utc = datetime.now(UTC)
+            today_str = now_utc.strftime("%Y-%m-%d")
+            if end_date == today_str and now_utc.hour < 21:
+                # Market hasn't closed yet (or bars haven't been published).
+                # Roll back to the previous trading day.
+                yesterday = end_dt - timedelta(days=1)
+                last_trading = self._get_last_trading_day(yesterday)
+                logger.debug(
+                    f"Market still open/bars not ready — adjusting end date from {end_date} to {last_trading.strftime('%Y-%m-%d')}"
+                )
+                end_date = last_trading.strftime("%Y-%m-%d")
+            elif not self._is_trading_day(end_dt):
                 last_trading = self._get_last_trading_day(end_dt)
                 logger.debug(
                     f"Adjusting end date from {end_date} to last trading day {last_trading.strftime('%Y-%m-%d')}"
