@@ -578,9 +578,9 @@ class EnhancedStockDataProvider:
             end_dt = pd.to_datetime(end_date)
             now_utc = datetime.now(UTC)
             today_str = now_utc.strftime("%Y-%m-%d")
-            if end_date == today_str and now_utc.hour < 21:
-                # Market hasn't closed yet (or bars haven't been published).
-                # Roll back to the previous trading day.
+            if end_date == today_str and now_utc.hour < 22:
+                # Daily bars aren't reliably available until ~1 hour after close
+                # (market close = 21:00 UTC). Roll back to the previous trading day.
                 yesterday = end_dt - timedelta(days=1)
                 last_trading = self._get_last_trading_day(yesterday)
                 logger.debug(
