@@ -31,6 +31,7 @@ from maverick_mcp.data.session_management import get_db_session_read_only
 from maverick_mcp.utils.circuit_breaker_decorators import (
     with_stock_data_circuit_breaker,
 )
+from maverick_mcp.utils.alpaca_pool import get_alpaca_pool
 from maverick_mcp.utils.yfinance_pool import get_yfinance_pool
 
 # Load environment variables
@@ -56,14 +57,15 @@ class EnhancedStockDataProvider:
             db_session: Optional database session for dependency injection.
                        If not provided, will get sessions as needed.
         """
-        self.timeout = 60
+        self.timeout = 30
         self.max_retries = 3
         self.cache_days = 1  # Cache data for 1 day by default
         # Initialize NYSE calendar for US stock market
         self.market_calendar = mcal.get_calendar("NYSE")
         self._db_session = db_session
-        # Initialize yfinance connection pool
-        self._yf_pool = get_yfinance_pool()
+        # Initialize data pools
+        self._alpaca_pool = get_alpaca_pool()  # Primary: OHLCV bars
+        self._yf_pool = get_yfinance_pool()  # Metadata: info, earnings, news
         if db_session:
             # Test the provided session
             self._test_db_connection_with_session(db_session)
@@ -192,7 +194,7 @@ class EnhancedStockDataProvider:
                     logger.info(
                         f"Fetching missing data for {symbol} from {miss_start} to {miss_end}"
                     )
-                    missing_df = self._fetch_stock_data_from_yfinance(
+                    missing_df = self._fetch_stock_data(
                         symbol, miss_start, miss_end, None, interval
                     )
                     if not missing_df.empty:
@@ -241,7 +243,7 @@ class EnhancedStockDataProvider:
                 logger.info(
                     f"Fetching data for trading days: {fetch_start} to {fetch_end}"
                 )
-                df = self._fetch_stock_data_from_yfinance(
+                df = self._fetch_stock_data(
                     symbol, fetch_start, fetch_end, None, interval
                 )
                 if not df.empty:
@@ -558,7 +560,7 @@ class EnhancedStockDataProvider:
         """
         # For non-daily intervals or periods, always fetch fresh data
         if interval != "1d" or period:
-            return self._fetch_stock_data_from_yfinance(
+            return self._fetch_stock_data(
                 symbol, start_date, end_date, period, interval
             )
 
@@ -582,7 +584,7 @@ class EnhancedStockDataProvider:
         # If cache is disabled, fetch directly from yfinance
         if not use_cache:
             logger.info(f"Cache disabled, fetching from yfinance for {symbol}")
-            return self._fetch_stock_data_from_yfinance(
+            return self._fetch_stock_data(
                 symbol, start_date, end_date, period, interval
             )
 
@@ -593,7 +595,7 @@ class EnhancedStockDataProvider:
             )
         except Exception as e:
             logger.warning(f"Smart cache failed, falling back to yfinance: {e}")
-            return self._fetch_stock_data_from_yfinance(
+            return self._fetch_stock_data(
                 symbol, start_date, end_date, period, interval
             )
 
@@ -646,7 +648,7 @@ class EnhancedStockDataProvider:
     @with_stock_data_circuit_breaker(
         use_fallback=False
     )  # Fallback handled at higher level
-    def _fetch_stock_data_from_yfinance(
+    def _fetch_stock_data(
         self,
         symbol: str,
         start_date: str | None = None,
@@ -655,18 +657,48 @@ class EnhancedStockDataProvider:
         interval: str = "1d",
     ) -> pd.DataFrame:
         """
-        Fetch stock data from yfinance with circuit breaker protection.
+        Fetch stock data using Alpaca (primary) with yfinance fallback.
 
-        Note: Circuit breaker is applied with use_fallback=False because
-        fallback strategies are handled at the get_stock_data level.
+        Alpaca is used for daily bars (fast, reliable, batch-capable).
+        yfinance is used as fallback and for non-daily intervals.
         """
-        logger.info(
-            f"Fetching data from yfinance for {symbol} - Start: {start_date}, End: {end_date}, Period: {period}, Interval: {interval}"
-        )
-        # Use connection pool for better performance
-        # The pool handles session management and retries internally
+        if interval != "1d":
+            # Alpaca free tier only supports daily bars — use yfinance for intraday
+            logger.info(
+                f"Using yfinance for non-daily interval {interval} for {symbol}"
+            )
+            df = self._yf_pool.get_history(
+                symbol=symbol,
+                start=start_date,
+                end=end_date,
+                period=period,
+                interval=interval,
+            )
+            return self._validate_ohlcv_df(df, symbol)
 
-        # Use the optimized connection pool
+        # Primary: Alpaca for daily bars
+        logger.info(
+            f"Fetching daily bars from Alpaca for {symbol} - Start: {start_date}, End: {end_date}, Period: {period}"
+        )
+        try:
+            df = self._alpaca_pool.get_history(
+                symbol=symbol,
+                start=start_date,
+                end=end_date,
+                period=period,
+                interval=interval,
+            )
+            if not df.empty:
+                return self._validate_ohlcv_df(df, symbol)
+            logger.warning(
+                f"Alpaca returned empty for {symbol}, falling back to yfinance"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Alpaca fetch failed for {symbol}: {e}, falling back to yfinance"
+            )
+
+        # Fallback: yfinance
         df = self._yf_pool.get_history(
             symbol=symbol,
             start=start_date,
@@ -674,25 +706,23 @@ class EnhancedStockDataProvider:
             period=period,
             interval=interval,
         )
+        return self._validate_ohlcv_df(df, symbol)
 
-        # Check if dataframe is empty or if required columns are missing
+    @staticmethod
+    def _validate_ohlcv_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Ensure DataFrame has required OHLCV columns and proper index."""
         if df.empty:
             logger.warning(f"Empty dataframe returned for {symbol}")
             return pd.DataFrame(
                 columns=["Open", "High", "Low", "Close", "Volume"]  # type: ignore[arg-type]
             )
 
-        # Ensure all expected columns exist
         for col in ["Open", "High", "Low", "Close", "Volume"]:
             if col not in df.columns:
                 logger.warning(
                     f"Column {col} missing from data for {symbol}, adding empty column"
                 )
-                # Use appropriate default values
-                if col == "Volume":
-                    df[col] = 0
-                else:
-                    df[col] = 0.0
+                df[col] = 0 if col == "Volume" else 0.0
 
         df.index.name = "Date"
         return df
@@ -1049,29 +1079,23 @@ class EnhancedStockDataProvider:
         return self._yf_pool.get_info(symbol)
 
     def get_realtime_data(self, symbol):
-        """Get the latest real-time data for a symbol using yfinance."""
+        """Get the latest real-time data for a symbol using Alpaca."""
         try:
-            # Use connection pool for real-time data
-            data = self._yf_pool.get_history(symbol, period="1d")
+            # Fetch last 5 trading days to ensure we have previous close
+            data = self._alpaca_pool.get_history(symbol, period="5d")
 
             if data.empty:
                 return None
 
             latest = data.iloc[-1]
+            price = float(latest["Close"])
 
-            # Get previous close for change calculation
-            info = self._yf_pool.get_info(symbol)
-            prev_close = info.get("previousClose", None)
-            if prev_close is None:
-                # Try to get from 2-day history
-                data_2d = self._yf_pool.get_history(symbol, period="2d")
-                if len(data_2d) > 1:
-                    prev_close = data_2d.iloc[0]["Close"]
-                else:
-                    prev_close = latest["Close"]
+            # Get previous close from history
+            if len(data) > 1:
+                prev_close = float(data.iloc[-2]["Close"])
+            else:
+                prev_close = price
 
-            # Calculate change
-            price = latest["Close"]
             change = price - prev_close
             change_percent = (change / prev_close) * 100 if prev_close != 0 else 0
 
@@ -1082,8 +1106,10 @@ class EnhancedStockDataProvider:
                 "change_percent": round(change_percent, 2),
                 "volume": int(latest["Volume"]),
                 "timestamp": data.index[-1],
-                "timestamp_display": data.index[-1].strftime("%Y-%m-%d %H:%M:%S"),
-                "is_real_time": False,  # yfinance data has some delay
+                "timestamp_display": pd.Timestamp(data.index[-1]).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                "is_real_time": False,  # Alpaca free tier has 15min delay
             }
         except Exception as e:
             logger.error(f"Error fetching realtime data for {symbol}: {str(e)}")
@@ -1092,59 +1118,33 @@ class EnhancedStockDataProvider:
     def get_all_realtime_data(self, symbols):
         """
         Get all latest real-time data for multiple symbols efficiently.
-        Optimized to use batch downloading to reduce network requests.
+        Uses Alpaca batch API to fetch all symbols in a single request.
         """
         if not symbols:
             return {}
 
         results = {}
         try:
-            # Batch download 5 days of data to ensure we have previous close
-            # Using group_by='ticker' makes the structure predictable: Level 0 = Ticker, Level 1 = Price Type
-            batch_df = self._yf_pool.batch_download(
-                symbols=symbols, period="5d", interval="1d", group_by="ticker"
-            )
-
-            # Check if we got any data
-            if batch_df.empty:
-                logger.warning("Batch download returned empty DataFrame")
-                return {}
-
-            # Handle both MultiIndex (multiple symbols) and single symbol cases
-            is_multi_ticker = isinstance(batch_df.columns, pd.MultiIndex)
+            # Batch fetch 7 days of data to ensure we have previous close
+            end = datetime.now(UTC).strftime("%Y-%m-%d")
+            start = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d")
+            batch = self._alpaca_pool.batch_get_history(symbols, start, end)
 
             for symbol in symbols:
                 try:
-                    symbol_data = None
-
-                    if is_multi_ticker:
-                        if symbol in batch_df.columns:
-                            symbol_data = batch_df[symbol]
-                    elif len(symbols) == 1 and symbols[0] == symbol:
-                        # Single symbol case, columns are just price types
-                        symbol_data = batch_df
-
-                    if symbol_data is None or symbol_data.empty:
-                        logger.debug(f"No batch data for {symbol}, falling back to individual fetch")
-                        # Fallback to individual fetch
-                        data = self.get_realtime_data(symbol)
-                        if data:
-                            results[symbol] = data
+                    sym_df = batch.get(symbol)
+                    if sym_df is None or sym_df.empty:
+                        logger.debug(
+                            f"No Alpaca batch data for {symbol}, skipping"
+                        )
                         continue
 
-                    # Drop NaNs (e.g., if one stock has missing data for a day)
-                    symbol_data = symbol_data.dropna(how="all")
-
-                    if len(symbol_data) < 1:
-                        continue
-
-                    latest = symbol_data.iloc[-1]
+                    latest = sym_df.iloc[-1]
                     price = float(latest["Close"])
                     volume = int(latest["Volume"])
 
-                    # Calculate change
-                    if len(symbol_data) > 1:
-                        prev_close = float(symbol_data.iloc[-2]["Close"])
+                    if len(sym_df) > 1:
+                        prev_close = float(sym_df.iloc[-2]["Close"])
                         change = price - prev_close
                         change_percent = (
                             (change / prev_close) * 100 if prev_close != 0 else 0
@@ -1159,22 +1159,18 @@ class EnhancedStockDataProvider:
                         "change": round(change, 2),
                         "change_percent": round(change_percent, 2),
                         "volume": volume,
-                        "timestamp": symbol_data.index[-1],
-                        "timestamp_display": symbol_data.index[-1].strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
-                        "is_real_time": False,  # yfinance data has some delay
+                        "timestamp": sym_df.index[-1],
+                        "timestamp_display": pd.Timestamp(
+                            sym_df.index[-1]
+                        ).strftime("%Y-%m-%d %H:%M:%S"),
+                        "is_real_time": False,  # Alpaca free tier has 15min delay
                     }
 
                 except Exception as e:
-                    logger.error(f"Error processing batch data for {symbol}: {e}")
-                    # Try fallback
-                    data = self.get_realtime_data(symbol)
-                    if data:
-                        results[symbol] = data
+                    logger.error(f"Error processing Alpaca batch data for {symbol}: {e}")
 
         except Exception as e:
-            logger.error(f"Batch download failed: {e}")
+            logger.error(f"Alpaca batch fetch failed: {e}")
             # Fallback to iterative approach
             for symbol in symbols:
                 data = self.get_realtime_data(symbol)
