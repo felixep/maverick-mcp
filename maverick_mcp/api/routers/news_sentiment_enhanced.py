@@ -60,7 +60,12 @@ async def _fetch_alpaca_news(
     days = int(timeframe.rstrip("d")) if timeframe.endswith("d") else 7
     start_date = end_date - timedelta(days=days)
 
-    client = NewsClient()  # No API key required for news
+    # alpaca-py auto-detects APCA_API_KEY_ID / APCA_API_SECRET_KEY,
+    # but this container uses ALPACA_API_KEY / ALPACA_SECRET_KEY, so pass explicitly.
+    api_key = os.environ.get("ALPACA_API_KEY") or os.environ.get("APCA_API_KEY_ID", "")
+    secret_key = os.environ.get("ALPACA_SECRET_KEY") or os.environ.get("APCA_API_SECRET_KEY", "")
+    client = NewsClient(api_key=api_key, secret_key=secret_key)
+
     request = NewsRequest(
         symbols=ticker,
         start=start_date,
@@ -73,7 +78,7 @@ async def _fetch_alpaca_news(
     news = await asyncio.to_thread(client.get_news, request)
 
     articles = []
-    for article in news.news:
+    for article in news.data.get("news", []):
         articles.append(
             {
                 "title": article.headline,
