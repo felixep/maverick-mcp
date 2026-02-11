@@ -83,14 +83,15 @@ async def get_full_technical_analysis_enhanced(
     days = request.days
 
     try:
-        # Set overall timeout (25s to stay under Claude Desktop's 30s limit)
+        # Overall timeout: 45s allows headroom for concurrent yfinance requests
+        # (Claude Desktop uses 30s but the trading pipeline uses 90s)
         return await asyncio.wait_for(
             _execute_technical_analysis_with_logging(tool_logger, ticker, days),
-            timeout=25.0,
+            timeout=45.0,
         )
 
     except TimeoutError:
-        error_msg = f"Technical analysis for {ticker} timed out after 25 seconds"
+        error_msg = f"Technical analysis for {ticker} timed out after 45 seconds"
         tool_logger.error("timeout", TimeoutError(error_msg))
         logger.error(error_msg, extra={"ticker": ticker, "days": days})
 
@@ -99,7 +100,7 @@ async def get_full_technical_analysis_enhanced(
             "error_type": "timeout",
             "ticker": ticker,
             "status": "failed",
-            "execution_time": 25.0,
+            "execution_time": 45.0,
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
@@ -143,7 +144,7 @@ async def _execute_technical_analysis_with_logging(
     try:
         df = await asyncio.wait_for(
             get_stock_dataframe_async(ticker, days),
-            timeout=8.0,  # Data fetch should be fast
+            timeout=20.0,  # Increased for concurrent requests (yfinance throttles under load)
         )
 
         if df.empty:

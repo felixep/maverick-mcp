@@ -56,7 +56,7 @@ class EnhancedStockDataProvider:
             db_session: Optional database session for dependency injection.
                        If not provided, will get sessions as needed.
         """
-        self.timeout = 30
+        self.timeout = 60
         self.max_retries = 3
         self.cache_days = 1  # Cache data for 1 day by default
         # Initialize NYSE calendar for US stock market
