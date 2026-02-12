@@ -89,8 +89,14 @@ class ScreeningScheduler:
 
                 if is_weekday and past_screening_time and not_run_today:
                     logger.info(
-                        f"Triggering daily screening refresh at {et_now.strftime('%Y-%m-%d %I:%M %p')} ET"
+                        f"Triggering daily data refresh + screening at {et_now.strftime('%Y-%m-%d %I:%M %p')} ET"
                     )
+                    # Step 1: Refresh daily bars from Alpaca
+                    try:
+                        await self._refresh_daily_bars()
+                    except Exception as e:
+                        logger.error(f"Daily bar refresh failed: {e} — screening will use cached data")
+                    # Step 2: Run screening on fresh data
                     await self.run_screening()
                     self._last_run_date = current_date
 
@@ -102,6 +108,58 @@ class ScreeningScheduler:
             except Exception as e:
                 logger.error(f"Scheduler loop error: {e}")
                 await asyncio.sleep(300)  # Wait 5 min on error
+
+    async def _refresh_daily_bars(self) -> dict:
+        """Fetch today's daily bars for all active stocks and cache them.
+
+        Runs before screening to ensure the algorithms use the latest market close.
+        Uses Alpaca batch API — ~520 symbols in 6 API calls, ~5-10 seconds total.
+        """
+        from maverick_mcp.config.database_self_contained import (
+            SelfContainedDatabaseSession,
+            init_self_contained_database,
+        )
+        from maverick_mcp.data.models import Stock, bulk_insert_price_data
+        from maverick_mcp.utils.alpaca_pool import get_alpaca_pool
+
+        database_url = os.environ.get("DATABASE_URL")
+        init_self_contained_database(database_url=database_url)
+
+        alpaca = get_alpaca_pool()
+        # Fetch last 7 calendar days to cover weekends/holidays
+        end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        with SelfContainedDatabaseSession() as session:
+            symbols = [
+                row[0]
+                for row in session.query(Stock.ticker_symbol)
+                .filter(Stock.is_active == True)
+                .all()
+            ]
+            logger.info(f"Refreshing daily bars for {len(symbols)} active stocks")
+
+            total_inserted = 0
+            batch_size = 100
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i : i + batch_size]
+                try:
+                    bars = alpaca.batch_get_history(batch, start, end)
+                    for sym, df in bars.items():
+                        if not df.empty:
+                            count = bulk_insert_price_data(session, sym, df)
+                            total_inserted += count
+                except Exception as e:
+                    logger.error(
+                        f"Alpaca batch fetch failed for batch {i // batch_size + 1}: {e}"
+                    )
+
+            logger.info(
+                f"Daily bar refresh complete: {total_inserted} new records "
+                f"for {len(symbols)} symbols"
+            )
+
+        return {"symbols": len(symbols), "new_records": total_inserted}
 
     async def run_screening(self, symbols: list[str] | None = None) -> dict:
         """Run the screening pipeline.
