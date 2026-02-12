@@ -297,17 +297,22 @@ def analyze_rsi(df: pd.DataFrame) -> dict[str, Any]:
 
         if rsi > 70:
             signal = "overbought"
-        elif rsi < 30:
-            signal = "oversold"
-        elif rsi > 50:
+        elif rsi > 60:
             signal = "bullish"
-        else:
+        elif rsi >= 40:
+            signal = "neutral"
+        elif rsi >= 30:
             signal = "bearish"
+        else:
+            signal = "oversold"
 
         return {
             "current": round(rsi, 2),
             "signal": signal,
-            "description": f"RSI is currently at {round(rsi, 2)}, indicating {signal} conditions.",
+            "description": (
+                f"RSI is currently at {round(rsi, 2)}, indicating {signal} conditions. "
+                f"(>70 overbought, 60-70 bullish, 40-60 neutral, 30-40 bearish, <30 oversold)"
+            ),
         }
     except Exception as e:
         logger.error(f"Error analyzing RSI: {e}")

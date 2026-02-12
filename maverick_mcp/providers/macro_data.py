@@ -339,31 +339,50 @@ class MacroDataProvider:
             return {"current": None, "previous": None, "bounds": (None, None)}
 
     def get_vix(self) -> float | None:
-        """Get VIX data from FRED."""
+        """Get current VIX level.
+
+        Attempts multiple sources in order:
+        1. yfinance ^VIX (real-time, with retry)
+        2. FRED VIXCLS (1-day lag)
+        """
+        # Source 1: yfinance (with retry)
         try:
             import yfinance as yf
 
-            # Try Yahoo Finance first
-            ticker = yf.Ticker("^VIX")
-            data = ticker.history(period="1d")
-            if not data.empty:
-                return float(data["Close"].iloc[-1])
+            for attempt in range(2):
+                try:
+                    ticker = yf.Ticker("^VIX")
+                    data = ticker.history(period="5d")
+                    if not data.empty:
+                        vix_value = float(data["Close"].iloc[-1])
+                        logger.info(f"VIX from yfinance: {vix_value:.2f}")
+                        return vix_value
+                except Exception as e:
+                    logger.warning(f"yfinance VIX attempt {attempt + 1} failed: {e}")
+                    if attempt == 0:
+                        import time
+                        time.sleep(1)
+        except ImportError:
+            logger.warning("yfinance not available for VIX fetch")
 
-            # fallback to FRED
+        # Source 2: FRED VIXCLS (wider 14-day window)
+        try:
             end_date = datetime.now(UTC)
-            start_date = end_date - timedelta(days=7)
+            start_date = end_date - timedelta(days=14)
             series_data = self.fred.get_series(
                 "VIXCLS", start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
             )
             if isinstance(series_data, pd.Series):
                 df = series_data.dropna()
                 if not df.empty:
-                    return float(df.iloc[-1])
-
-            return None
+                    vix_value = float(df.iloc[-1])
+                    logger.info(f"VIX from FRED: {vix_value:.2f}")
+                    return vix_value
         except Exception as e:
-            logger.error(f"Error fetching VIX: {e}")
-            return None
+            logger.error(f"FRED VIX fallback failed: {e}")
+
+        logger.error("All VIX sources failed, returning None")
+        return None
 
     def get_sp500_momentum(self) -> float:
         """

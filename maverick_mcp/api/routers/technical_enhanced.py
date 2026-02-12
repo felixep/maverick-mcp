@@ -252,10 +252,12 @@ async def _execute_technical_analysis_with_logging(
     tool_logger.step("result_compilation", "Compiling final analysis results")
     try:
         current_price = float(df["close"].iloc[-1])
+        data_as_of = df.index[-1].isoformat() if hasattr(df.index[-1], 'isoformat') else str(df.index[-1])
 
         result = {
             "ticker": ticker,
             "current_price": current_price,
+            "data_as_of": data_as_of,
             "trend": trend,
             "outlook": outlook,
             "indicators": {
@@ -273,6 +275,7 @@ async def _execute_technical_analysis_with_logging(
             "analysis_metadata": {
                 "data_points": len(df),
                 "period_days": days,
+                "data_as_of": data_as_of,
                 "has_premium": has_premium,
                 "timestamp": datetime.now(UTC).isoformat(),
             },
