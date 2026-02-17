@@ -373,6 +373,19 @@ def register_backtesting_tools(mcp: FastMCP) -> None:
         logger.error(f"✗ Failed to register backtesting tools: {e}")
 
 
+def register_management_tools(mcp: FastMCP) -> None:
+    """Register universe management tools directly on main server"""
+    from maverick_mcp.api.routers.management import (
+        deactivate_ticker,
+        list_universe,
+        register_ticker,
+    )
+
+    mcp.tool(name="management_register_ticker")(register_ticker)
+    mcp.tool(name="management_deactivate_ticker")(deactivate_ticker)
+    mcp.tool(name="management_list_universe")(list_universe)
+
+
 def register_mcp_prompts_and_resources(mcp: FastMCP) -> None:
     """Register MCP prompts and resources for better client introspection"""
     try:
@@ -459,6 +472,13 @@ def register_all_router_tools(mcp: FastMCP) -> None:
     # Register backtesting tools
     register_backtesting_tools(mcp)
 
+    # Register universe management tools
+    try:
+        register_management_tools(mcp)
+        logger.info("✓ Management tools registered successfully")
+    except Exception as e:
+        logger.error(f"✗ Failed to register management tools: {e}")
+
     # Register MCP prompts and resources for introspection
     register_mcp_prompts_and_resources(mcp)
 
@@ -473,5 +493,6 @@ def register_all_router_tools(mcp: FastMCP) -> None:
     logger.info("   • Research and analysis tools")
     logger.info("   • Health monitoring tools")
     logger.info("   • Backtesting system tools")
+    logger.info("   • Universe management tools")
     logger.info("   • MCP prompts for introspection")
     logger.info("   • Introspection and discovery tools")
