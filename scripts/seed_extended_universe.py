@@ -2,19 +2,24 @@
 """
 Extended universe seed script for MaverickMCP.
 
-Expands the screened universe beyond S&P 500 by adding NASDAQ 100
-and S&P 400 Mid-Cap constituents using the Financial Modeling Prep API.
+Expands the screened universe beyond S&P 500 by pulling four lists from
+stockanalysis.com (no API key required):
+
+  - NASDAQ 100  : https://stockanalysis.com/list/nasdaq-100-stocks/
+  - Dow Jones   : https://stockanalysis.com/list/dow-jones-stocks/
+  - Top Dividend : https://stockanalysis.com/list/top-rated-dividend-stocks/
+  - Mid-Cap     : https://stockanalysis.com/list/mid-cap-stocks/
 
 Usage:
-    FMP_API_KEY=yourkey python scripts/seed_extended_universe.py
-
-Get a free API key at https://financialmodelingprep.com
+    python scripts/seed_extended_universe.py
 """
 
 import logging
 import os
+import re
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 # Add project root to Python path
@@ -23,7 +28,6 @@ sys.path.insert(0, str(project_root))
 
 # noqa: E402 - imports must come after sys.path modification
 import pandas as pd  # noqa: E402
-import requests  # noqa: E402
 import yfinance as yf  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
@@ -35,74 +39,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger("maverick_mcp.seed_extended")
 
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
-
-# Fallback list if FMP returns no data for NASDAQ 100
+# Built-in fallback for NASDAQ 100 (used only if stockanalysis.com is unreachable)
 NASDAQ100_FALLBACK = [
-    ("MSFT", "Microsoft Corporation", "Information Technology", "Software"),
-    ("AAPL", "Apple Inc.", "Information Technology", "Technology Hardware, Storage & Peripherals"),
-    ("NVDA", "NVIDIA Corporation", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("AMZN", "Amazon.com Inc.", "Consumer Discretionary", "Internet & Direct Marketing Retail"),
-    ("GOOGL", "Alphabet Inc.", "Communication Services", "Interactive Media & Services"),
-    ("GOOG", "Alphabet Inc. Class C", "Communication Services", "Interactive Media & Services"),
-    ("META", "Meta Platforms Inc.", "Communication Services", "Interactive Media & Services"),
-    ("TSLA", "Tesla Inc.", "Consumer Discretionary", "Automobiles"),
-    ("AVGO", "Broadcom Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("COST", "Costco Wholesale Corp.", "Consumer Staples", "Food & Staples Retailing"),
-    ("ASML", "ASML Holding NV", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("NFLX", "Netflix Inc.", "Communication Services", "Entertainment"),
-    ("AMD", "Advanced Micro Devices Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("AZN", "AstraZeneca PLC", "Health Care", "Pharmaceuticals"),
-    ("ADBE", "Adobe Inc.", "Information Technology", "Software"),
-    ("QCOM", "QUALCOMM Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("INTC", "Intel Corp.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("INTU", "Intuit Inc.", "Information Technology", "Software"),
-    ("TXN", "Texas Instruments Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("CMCSA", "Comcast Corp.", "Communication Services", "Cable & Satellite"),
-    ("AMAT", "Applied Materials Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("MU", "Micron Technology Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("ISRG", "Intuitive Surgical Inc.", "Health Care", "Health Care Equipment & Supplies"),
-    ("BKNG", "Booking Holdings Inc.", "Consumer Discretionary", "Internet & Direct Marketing Retail"),
-    ("SBUX", "Starbucks Corp.", "Consumer Discretionary", "Restaurants"),
-    ("GILD", "Gilead Sciences Inc.", "Health Care", "Biotechnology"),
-    ("MDLZ", "Mondelez International Inc.", "Consumer Staples", "Food Products"),
-    ("ADI", "Analog Devices Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("REGN", "Regeneron Pharmaceuticals", "Health Care", "Biotechnology"),
-    ("LRCX", "Lam Research Corp.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
+    "MSFT", "AAPL", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO", "COST",
+    "ASML", "NFLX", "AMD", "AZN", "ADBE", "QCOM", "INTC", "INTU", "TXN", "CMCSA",
+    "AMAT", "MU", "ISRG", "BKNG", "SBUX", "GILD", "MDLZ", "ADI", "REGN", "LRCX",
 ]
 
-# Fallback list if FMP returns no data or S&P 400 endpoint requires paid tier
-SP400_FALLBACK = [
-    ("BE", "Bloom Energy Corp.", "Industrials", "Electrical Components & Equipment"),
-    ("SFM", "Sprouts Farmers Market Inc.", "Consumer Staples", "Food & Staples Retailing"),
-    ("TREX", "Trex Company Inc.", "Industrials", "Building Products"),
-    ("CHDN", "Churchill Downs Inc.", "Consumer Discretionary", "Casinos & Gaming"),
-    ("ITT", "ITT Inc.", "Industrials", "Industrial Machinery"),
-    ("CIVI", "Civitas Resources Inc.", "Energy", "Oil, Gas & Consumable Fuels"),
-    ("UFPI", "UFP Industries Inc.", "Industrials", "Forest Products"),
-    ("IRDM", "Iridium Communications Inc.", "Communication Services", "Wireless Telecommunication Services"),
-    ("LGIH", "LGI Homes Inc.", "Consumer Discretionary", "Homebuilding"),
-    ("MMSI", "Merit Medical Systems Inc.", "Health Care", "Health Care Equipment & Supplies"),
-    ("MRCY", "Mercury Systems Inc.", "Industrials", "Aerospace & Defense"),
-    ("NVEE", "NV5 Global Inc.", "Industrials", "Engineering & Construction Services"),
-    ("FORM", "FormFactor Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("HAFC", "Hanmi Financial Corp.", "Financials", "Banks"),
-    ("FHB", "First Hawaiian Inc.", "Financials", "Banks"),
-    ("NBTB", "NBT Bancorp Inc.", "Financials", "Banks"),
-    ("OFG", "OFG Bancorp", "Financials", "Banks"),
-    ("NSIT", "Insight Direct Worldwide Inc.", "Information Technology", "IT Services"),
-    ("PLUS", "ePlus Inc.", "Information Technology", "IT Services"),
-    ("PTCT", "PTC Therapeutics Inc.", "Health Care", "Biotechnology"),
-    ("LNTH", "Lantheus Holdings Inc.", "Health Care", "Health Care Supplies"),
-    ("VIRT", "Virtu Financial Inc.", "Financials", "Capital Markets"),
-    ("WMS", "Advanced Drainage Systems Inc.", "Industrials", "Building Products"),
-    ("MGEE", "MGE Energy Inc.", "Utilities", "Electric Utilities"),
-    ("MSEX", "Middlesex Water Company", "Utilities", "Water Utilities"),
-    ("PIPR", "Piper Sandler Companies", "Financials", "Capital Markets"),
-    ("RMBS", "Rambus Inc.", "Information Technology", "Semiconductors & Semiconductor Equipment"),
-    ("GOLF", "Acushnet Holdings Corp.", "Consumer Discretionary", "Leisure Products"),
-    ("CRVL", "CorVel Corp.", "Health Care", "Health Care Services"),
-    ("UFPT", "UFP Technologies Inc.", "Materials", "Containers & Packaging"),
+# Stockanalysis.com list definitions
+LISTS = [
+    ("NASDAQ 100",       "https://stockanalysis.com/list/nasdaq-100-stocks/",         20),
+    ("Dow Jones",        "https://stockanalysis.com/list/dow-jones-stocks/",           20),
+    ("Top Dividend",     "https://stockanalysis.com/list/top-rated-dividend-stocks/",  20),
+    ("Mid-Cap",          "https://stockanalysis.com/list/mid-cap-stocks/",            200),
 ]
 
 
@@ -111,94 +60,47 @@ def get_database_url() -> str:
     return os.getenv("DATABASE_URL") or "sqlite:///maverick_mcp.db"
 
 
-def fetch_fmp_constituents(endpoint: str, api_key: str) -> list[dict]:
+def fetch_stockanalysis_symbols(name: str, url: str, min_expected: int) -> list[str]:
     """
-    Fetch index constituents from FMP API.
+    Fetch ticker symbols from a stockanalysis.com list page.
 
-    Returns list of constituent dicts on success, empty list on error.
+    Uses the same embedded SvelteKit JSON extraction pattern as load_alpaca_data.py.
+    Returns [] if the page is unavailable or returns too few symbols.
     """
-    url = f"{FMP_BASE_URL}/{endpoint}?apikey={api_key}"
     try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list) and len(data) > 0:
-            return data
-        # FMP returns {"Error Message": "..."} for invalid keys or paid endpoints
-        if isinstance(data, dict) and "Error Message" in data:
-            logger.warning(f"FMP error for {endpoint}: {data['Error Message']}")
-        return []
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            html = response.read().decode("utf-8")
+
+        raw = re.findall(r'["\']?s["\']?\s*:\s*"([A-Z]{1,5}(?:\.[A-Z])?)"', html)
+        seen: set[str] = set()
+        symbols: list[str] = []
+        for s in raw:
+            if s not in seen:
+                seen.add(s)
+                symbols.append(s)
+
+        if len(symbols) < min_expected:
+            logger.warning(
+                f"{name}: only {len(symbols)} symbols returned (expected ≥{min_expected})"
+            )
+            return []
+
+        logger.info(f"{name}: fetched {len(symbols)} symbols from stockanalysis.com")
+        return symbols
+
     except Exception as e:
-        logger.warning(f"FMP request failed for {endpoint}: {e}")
+        logger.warning(f"{name}: could not fetch from stockanalysis.com — {e}")
         return []
-
-
-def fetch_nasdaq100_list(api_key: str) -> pd.DataFrame:
-    """Fetch NASDAQ 100 constituents from FMP, with fallback."""
-    logger.info("Fetching NASDAQ 100 list from FMP...")
-    data = fetch_fmp_constituents("nasdaq_constituent", api_key)
-
-    if data:
-        rows = []
-        for item in data:
-            symbol = str(item.get("symbol", "")).strip().replace(".", "-")
-            if symbol:
-                rows.append({
-                    "symbol": symbol,
-                    "company": item.get("name", ""),
-                    "gics_sector": item.get("sector", ""),
-                    "gics_sub_industry": item.get("subSector", ""),
-                })
-        df = pd.DataFrame(rows)
-        logger.info(f"Fetched {len(df)} NASDAQ 100 constituents from FMP")
-        return df
-
-    logger.warning("FMP returned no NASDAQ 100 data — using built-in fallback list")
-    return pd.DataFrame(
-        NASDAQ100_FALLBACK,
-        columns=["symbol", "company", "gics_sector", "gics_sub_industry"],
-    )
-
-
-def fetch_sp400_list(api_key: str) -> pd.DataFrame:
-    """Fetch S&P 400 Mid-Cap constituents from FMP, with fallback."""
-    logger.info("Fetching S&P 400 Mid-Cap list from FMP...")
-    data = fetch_fmp_constituents("sp400_constituent", api_key)
-
-    if data:
-        rows = []
-        for item in data:
-            symbol = str(item.get("symbol", "")).strip().replace(".", "-")
-            if symbol:
-                rows.append({
-                    "symbol": symbol,
-                    "company": item.get("name", ""),
-                    "gics_sector": item.get("sector", ""),
-                    "gics_sub_industry": item.get("subSector", ""),
-                })
-        df = pd.DataFrame(rows)
-        logger.info(f"Fetched {len(df)} S&P 400 Mid-Cap constituents from FMP")
-        return df
-
-    logger.warning(
-        "FMP returned no S&P 400 data (may require paid tier) — using built-in fallback list"
-    )
-    return pd.DataFrame(
-        SP400_FALLBACK,
-        columns=["symbol", "company", "gics_sector", "gics_sub_industry"],
-    )
 
 
 def enrich_stock_data(symbol: str) -> dict:
-    """Enrich stock data with additional information from yfinance."""
+    """Enrich stock metadata from yfinance."""
     try:
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-
+        info = yf.Ticker(symbol).info
         description = info.get("longBusinessSummary", "")
         if description and len(description) > 500:
             description = description[:500] + "..."
-
         return {
             "market_cap": info.get("marketCap"),
             "shares_outstanding": info.get("sharesOutstanding"),
@@ -210,13 +112,13 @@ def enrich_stock_data(symbol: str) -> dict:
             "sector": info.get("sector", ""),
         }
     except Exception as e:
-        logger.warning(f"Failed to enrich data for {symbol}: {e}")
+        logger.warning(f"yfinance enrichment failed for {symbol}: {e}")
         return {}
 
 
-def create_stocks(session, df: pd.DataFrame) -> tuple[int, int]:
+def create_stocks(session, symbols: list[str]) -> tuple[int, int]:
     """
-    Add stocks to the DB using Stock.get_or_create (duplicate-safe).
+    Add tickers to the DB using Stock.get_or_create (duplicate-safe).
 
     Returns:
         Tuple of (added_count, skipped_count)
@@ -225,23 +127,18 @@ def create_stocks(session, df: pd.DataFrame) -> tuple[int, int]:
     skipped = 0
     batch_size = 10
 
-    for i, row in df.iterrows():
-        symbol = str(row["symbol"]).strip()
+    for symbol in symbols:
+        symbol = symbol.strip().upper()
         if not symbol:
             continue
 
-        company = str(row.get("company", "")).strip()
-        sector = str(row.get("gics_sector", "")).strip()
-        industry = str(row.get("gics_sub_industry", "")).strip()
-
-        # Check if already exists — skip without making an API call
-        existing = session.query(Stock).filter_by(ticker_symbol=symbol.upper()).first()
-        if existing:
+        # Skip if already in DB
+        if session.query(Stock).filter_by(ticker_symbol=symbol).first():
             skipped += 1
             continue
 
         try:
-            # Rate limiting — pause every batch to be friendly to yfinance
+            # Rate-limit yfinance calls
             if added > 0 and added % batch_size == 0:
                 logger.info(f"Processed {added} new stocks so far, pausing 2s...")
                 time.sleep(2)
@@ -251,10 +148,10 @@ def create_stocks(session, df: pd.DataFrame) -> tuple[int, int]:
             Stock.get_or_create(
                 session,
                 ticker_symbol=symbol,
-                company_name=company,
-                sector=enriched.get("sector") or sector or "Unknown",
-                industry=enriched.get("industry") or industry or "Unknown",
-                description=enriched.get("description") or f"{company} - Extended universe",
+                company_name=enriched.get("sector", ""),  # filled by yfinance
+                sector=enriched.get("sector") or "Unknown",
+                industry=enriched.get("industry") or "Unknown",
+                description=enriched.get("description") or f"{symbol} - Extended universe",
                 exchange=enriched.get("exchange", "NASDAQ"),
                 country=enriched.get("country", "US"),
                 currency=enriched.get("currency", "USD"),
@@ -263,7 +160,7 @@ def create_stocks(session, df: pd.DataFrame) -> tuple[int, int]:
                 is_active=True,
             )
             added += 1
-            logger.info(f"✓ Added {symbol}: {company}")
+            logger.info(f"✓ Added {symbol}")
 
         except Exception as e:
             logger.error(f"✗ Error adding {symbol}: {e}")
@@ -275,49 +172,48 @@ def create_stocks(session, df: pd.DataFrame) -> tuple[int, int]:
 
 def main() -> bool:
     """Main entry point."""
-    logger.info("🚀 Starting extended universe seeding (NASDAQ 100 + S&P 400 Mid-Cap)...")
-
-    api_key = os.getenv("FMP_API_KEY", "").strip()
-    if not api_key:
-        logger.error("FMP_API_KEY environment variable is not set.")
-        logger.error("Get a free key at https://financialmodelingprep.com")
-        logger.error(
-            "Usage: FMP_API_KEY=yourkey python scripts/seed_extended_universe.py"
-        )
-        return False
+    logger.info("🚀 Starting extended universe seeding...")
 
     database_url = get_database_url()
     logger.info(f"Database: {database_url}")
+
+    # Collect symbols from all lists
+    all_symbols: list[str] = []
+    for name, url, min_expected in LISTS:
+        symbols = fetch_stockanalysis_symbols(name, url, min_expected)
+        if not symbols and name == "NASDAQ 100":
+            logger.info("Using built-in NASDAQ 100 fallback list")
+            symbols = NASDAQ100_FALLBACK
+        all_symbols.extend(symbols)
+        logger.info(f"  {name}: {len(symbols)} symbols")
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique_symbols: list[str] = []
+    for s in all_symbols:
+        if s not in seen:
+            seen.add(s)
+            unique_symbols.append(s)
+
+    logger.info(
+        f"Combined: {len(unique_symbols)} unique tickers from {len(LISTS)} lists "
+        f"(before DB dedup)"
+    )
 
     engine = create_engine(database_url, echo=False)
     SessionLocal = sessionmaker(bind=engine)
 
     with SessionLocal() as session:
         try:
-            # Fetch both constituent lists
-            nasdaq_df = fetch_nasdaq100_list(api_key)
-            sp400_df = fetch_sp400_list(api_key)
+            added, skipped = create_stocks(session, unique_symbols)
 
-            # Combine and deduplicate by symbol
-            combined = pd.concat([nasdaq_df, sp400_df], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["symbol"])
-            logger.info(
-                f"Combined universe: {len(combined)} unique tickers to process "
-                f"({len(nasdaq_df)} NASDAQ 100 + {len(sp400_df)} S&P 400, deduped)"
-            )
-
-            # Add to DB
-            added, skipped = create_stocks(session, combined)
-
-            # Summary
             total_active = session.query(Stock).filter_by(is_active=True).count()
 
-            # Sector breakdown of new additions
             logger.info("")
             logger.info("=== Extended Universe Seeding Complete ===")
-            logger.info(f"✅ New tickers added:              {added}")
-            logger.info(f"⏭  Already in DB (skipped):       {skipped}")
-            logger.info(f"📊 Total active stocks in universe: {total_active}")
+            logger.info(f"✅ New tickers added:               {added}")
+            logger.info(f"⏭  Already in DB (skipped):        {skipped}")
+            logger.info(f"📊 Total active stocks in universe:  {total_active}")
             logger.info("")
 
             if total_active > 0:
