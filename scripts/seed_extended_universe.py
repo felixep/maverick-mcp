@@ -325,7 +325,7 @@ def main() -> bool:
                     text("""
                         SELECT sector, COUNT(*) as count
                         FROM mcp_stocks
-                        WHERE is_active = 1 AND sector IS NOT NULL
+                        WHERE is_active = true AND sector IS NOT NULL
                         GROUP BY sector
                         ORDER BY count DESC
                         LIMIT 10
