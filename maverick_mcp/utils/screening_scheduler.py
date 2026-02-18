@@ -109,11 +109,17 @@ class ScreeningScheduler:
                 logger.error(f"Scheduler loop error: {e}")
                 await asyncio.sleep(300)  # Wait 5 min on error
 
-    async def _refresh_daily_bars(self) -> dict:
-        """Fetch today's daily bars for all active stocks and cache them.
+    async def _refresh_daily_bars(self, symbols: list[str] | None = None) -> dict:
+        """Fetch daily bars for the given symbols and cache them.
 
-        Runs before screening to ensure the algorithms use the latest market close.
-        Uses Alpaca batch API — ~520 symbols in 6 API calls, ~5-10 seconds total.
+        When symbols is None (daily scheduled job): fetches all active stocks
+        using a 7-day lookback to pick up the latest market close.
+
+        When symbols is provided (targeted refresh for specific tickers): fetches
+        only those symbols using a 2-year lookback so that newly-added tickers
+        get enough history for MA200/RSI calculations.
+
+        Uses Alpaca batch API — efficient for both small and large symbol lists.
         """
         from maverick_mcp.config.database_self_contained import (
             SelfContainedDatabaseSession,
@@ -126,23 +132,33 @@ class ScreeningScheduler:
         init_self_contained_database(database_url=database_url)
 
         alpaca = get_alpaca_pool()
-        # Fetch last 7 calendar days to cover weekends/holidays
         end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
 
+        if symbols:
+            # Targeted refresh: 2-year lookback so new tickers get full bar history
+            start = (datetime.now(timezone.utc) - timedelta(days=730)).strftime("%Y-%m-%d")
+            target_symbols = [s.upper().strip() for s in symbols]
+            logger.info(
+                f"Targeted bar refresh for {len(target_symbols)} symbol(s) "
+                f"(2-year lookback): {', '.join(target_symbols)}"
+            )
+        else:
+            # Daily scheduled refresh: 7-day lookback covers weekends/holidays
+            start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+            with SelfContainedDatabaseSession() as session:
+                target_symbols = [
+                    row[0]
+                    for row in session.query(Stock.ticker_symbol)
+                    .filter(Stock.is_active == True)
+                    .all()
+                ]
+            logger.info(f"Refreshing daily bars for {len(target_symbols)} active stocks")
+
+        total_inserted = 0
+        batch_size = 100
         with SelfContainedDatabaseSession() as session:
-            symbols = [
-                row[0]
-                for row in session.query(Stock.ticker_symbol)
-                .filter(Stock.is_active == True)
-                .all()
-            ]
-            logger.info(f"Refreshing daily bars for {len(symbols)} active stocks")
-
-            total_inserted = 0
-            batch_size = 100
-            for i in range(0, len(symbols), batch_size):
-                batch = symbols[i : i + batch_size]
+            for i in range(0, len(target_symbols), batch_size):
+                batch = target_symbols[i : i + batch_size]
                 try:
                     bars = alpaca.batch_get_history(batch, start, end)
                     for sym, df in bars.items():
@@ -154,12 +170,12 @@ class ScreeningScheduler:
                         f"Alpaca batch fetch failed for batch {i // batch_size + 1}: {e}"
                     )
 
-            logger.info(
-                f"Daily bar refresh complete: {total_inserted} new records "
-                f"for {len(symbols)} symbols"
-            )
+        logger.info(
+            f"Bar refresh complete: {total_inserted} new records "
+            f"for {len(target_symbols)} symbols"
+        )
 
-        return {"symbols": len(symbols), "new_records": total_inserted}
+        return {"symbols": len(target_symbols), "new_records": total_inserted}
 
     async def run_screening(self, symbols: list[str] | None = None) -> dict:
         """Run the screening pipeline.
@@ -181,6 +197,20 @@ class ScreeningScheduler:
 
         try:
             logger.info(f"Starting screening refresh ({scope})...")
+
+            # When specific symbols are requested, fetch their bars first.
+            # New pinned tickers may have no history; without bars the screener
+            # silently skips them. The targeted refresh uses a 2-year lookback
+            # so MA200 and RSI calculations have sufficient data immediately.
+            if symbols:
+                try:
+                    bar_result = await self._refresh_daily_bars(symbols=symbols)
+                    logger.info(
+                        f"Pre-screening bar fetch: {bar_result['new_records']} new records "
+                        f"for {bar_result['symbols']} symbol(s)"
+                    )
+                except Exception as e:
+                    logger.warning(f"Pre-screening bar fetch failed (screening will use cached data): {e}")
 
             # Import here to avoid circular imports
             from maverick_mcp.config.database_self_contained import (
