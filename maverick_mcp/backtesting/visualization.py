@@ -23,7 +23,13 @@ def set_chart_style(theme: str = "light") -> None:
     Args:
         theme (str): Chart theme, either 'light' or 'dark'
     """
-    plt.style.use("seaborn")
+    try:
+        plt.style.use("seaborn-v0_8")
+    except OSError:
+        try:
+            plt.style.use("seaborn")
+        except OSError:
+            logger.warning("Seaborn matplotlib style not found, using default style")
 
     if theme == "dark":
         plt.style.use("dark_background")

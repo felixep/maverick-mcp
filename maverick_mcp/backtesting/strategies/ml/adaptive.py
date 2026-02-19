@@ -40,8 +40,8 @@ class AdaptiveStrategy(Strategy):
         self.base_strategy = base_strategy
         self.adaptation_method = adaptation_method
         self.learning_rate = learning_rate
-        self.lookback_period = lookback_period
-        self.adaptation_frequency = adaptation_frequency
+        self.lookback_period = int(lookback_period)
+        self.adaptation_frequency = int(adaptation_frequency)
 
         # Performance tracking
         self.performance_history = []
@@ -110,6 +110,10 @@ class AdaptiveStrategy(Strategy):
                 new_value = current_value + param_gradient * step_size
                 new_value = max(min_val, min(max_val, new_value))
 
+                # Preserve integer type for integer parameters
+                if isinstance(current_value, (int, np.integer)):
+                    new_value = int(round(new_value))
+
                 self.base_strategy.parameters[param_name] = new_value
 
                 logger.debug(
@@ -133,6 +137,10 @@ class AdaptiveStrategy(Strategy):
                 perturbation = np.random.normal(0, abs(current_value) * 0.1)
                 new_value = current_value + perturbation
                 new_value = max(min_val, min(max_val, new_value))
+
+                # Preserve integer type for integer parameters
+                if isinstance(current_value, (int, np.integer)):
+                    new_value = int(round(new_value))
 
                 # Store new value for trial
                 self.base_strategy.parameters[param_name] = new_value
@@ -279,11 +287,11 @@ class OnlineLearningStrategy(Strategy):
         """
         super().__init__(parameters)
         self.model_type = model_type
-        self.update_frequency = update_frequency
-        self.feature_window = feature_window
+        self.update_frequency = int(update_frequency)
+        self.feature_window = int(feature_window)
         self.confidence_threshold = confidence_threshold
-        self.min_training_samples = min_training_samples
-        self.initial_training_period = initial_training_period
+        self.min_training_samples = int(min_training_samples)
+        self.initial_training_period = int(initial_training_period)
 
         # Initialize online learning components
         self.model = None

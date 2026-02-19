@@ -3,16 +3,13 @@
 import re
 from typing import Any
 
-from langchain.prompts import PromptTemplate
-from langchain_anthropic import ChatAnthropic
-
 from .templates import STRATEGY_TEMPLATES
 
 
 class StrategyParser:
     """Parser for converting natural language to VectorBT strategies."""
 
-    def __init__(self, llm: ChatAnthropic | None = None):
+    def __init__(self, llm: Any | None = None):
         """Initialize strategy parser.
 
         Args:
@@ -217,6 +214,8 @@ class StrategyParser:
         if not self.llm:
             # Fall back to simple parsing
             return self.parse_simple(description)
+
+        from langchain.prompts import PromptTemplate
 
         prompt = PromptTemplate(
             input_variables=["description", "available_strategies"],
