@@ -338,6 +338,10 @@ class ScreeningScheduler:
 
             results["status"] = "completed"
             results["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+            # Invalidate screening caches so next request picks up fresh data
+            self._invalidate_screening_cache()
+
             logger.info(
                 f"Screening refresh complete ({scope}): "
                 f"maverick={results['maverick']}, "
@@ -351,6 +355,19 @@ class ScreeningScheduler:
             logger.error(f"Screening refresh failed: {e}")
 
         return results
+
+    @staticmethod
+    def _invalidate_screening_cache() -> None:
+        """Delete cached screening results so the next request picks up fresh data."""
+        try:
+            from maverick_mcp.data.cache import clear_cache
+
+            count = clear_cache("v1:screening:*")
+            count += clear_cache("v1:market:regime")
+            if count:
+                logger.info(f"Invalidated {count} screening cache entries")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate screening cache (non-fatal): {e}")
 
     @property
     def status(self) -> dict:

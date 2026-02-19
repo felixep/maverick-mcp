@@ -361,7 +361,14 @@ from maverick_mcp.api.routers.monitoring import router as monitoring_router
 if hasattr(mcp, "fastapi_app") and mcp.fastapi_app:
     mcp.fastapi_app.include_router(monitoring_router, tags=["monitoring"])
     mcp.fastapi_app.include_router(health_router, tags=["health"])
-    logger.info("Monitoring and health endpoints registered with FastAPI application")
+
+    # Direct REST API for programmatic consumers (autonomous-trader, n8n, etc.)
+    # Bypasses MCP protocol overhead (~1s handshake per call) for non-Claude clients.
+    from maverick_mcp.api.routers.trader_api import trader_router
+
+    mcp.fastapi_app.include_router(trader_router, tags=["trader-api"])
+
+    logger.info("Monitoring, health, and trader-api endpoints registered with FastAPI application")
 
 # Add Enhanced Rate Limiting Middleware
 # Configure limits based on settings

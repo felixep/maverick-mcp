@@ -37,16 +37,26 @@ def register_health_tools(mcp: FastMCP):
             Dictionary containing complete system health information
         """
         try:
+            from maverick_mcp.data.cache import get_from_cache, save_to_cache
+
+            cache_key = "v1:system_health"
+            cached = get_from_cache(cache_key)
+            if cached is not None:
+                return cached
+
             from maverick_mcp.api.routers.health_enhanced import (
                 _get_detailed_health_status,
             )
 
             health_status = await _get_detailed_health_status()
-            return {
+            result = {
                 "status": "success",
                 "data": health_status,
                 "timestamp": datetime.now(UTC).isoformat(),
             }
+
+            save_to_cache(cache_key, result, ttl=30)
+            return result
 
         except Exception as e:
             logger.error(f"Failed to get system health: {e}")

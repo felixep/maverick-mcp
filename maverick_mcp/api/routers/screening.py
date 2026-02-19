@@ -38,18 +38,28 @@ def get_maverick_stocks(limit: int = 20) -> dict[str, Any]:
         Dictionary containing Maverick stock screening results
     """
     try:
+        from maverick_mcp.data.cache import get_from_cache, save_to_cache
+
+        cache_key = f"v1:screening:maverick:{limit}"
+        cached = get_from_cache(cache_key)
+        if cached is not None:
+            return cached
+
         from maverick_mcp.data.models import MaverickStocks, SessionLocal
 
         with SessionLocal() as session:
             stocks = MaverickStocks.get_top_stocks(session, limit=limit)
 
-            return {
+            result = {
                 "status": "success",
                 "count": len(stocks),
                 "stocks": [stock.to_dict() for stock in stocks],
                 "screening_type": "maverick_bullish",
                 "description": "High momentum stocks with bullish technical setups",
             }
+
+        save_to_cache(cache_key, result, ttl=1800)
+        return result
     except Exception as e:
         logger.error(f"Error fetching Maverick stocks: {str(e)}")
         return {"error": str(e), "status": "error"}
@@ -76,18 +86,28 @@ def get_maverick_bear_stocks(limit: int = 20) -> dict[str, Any]:
         Dictionary containing Maverick Bear stock screening results
     """
     try:
+        from maverick_mcp.data.cache import get_from_cache, save_to_cache
+
+        cache_key = f"v1:screening:bear:{limit}"
+        cached = get_from_cache(cache_key)
+        if cached is not None:
+            return cached
+
         from maverick_mcp.data.models import MaverickBearStocks, SessionLocal
 
         with SessionLocal() as session:
             stocks = MaverickBearStocks.get_top_stocks(session, limit=limit)
 
-            return {
+            result = {
                 "status": "success",
                 "count": len(stocks),
                 "stocks": [stock.to_dict() for stock in stocks],
                 "screening_type": "maverick_bearish",
                 "description": "Weak stocks with bearish technical setups",
             }
+
+        save_to_cache(cache_key, result, ttl=1800)
+        return result
     except Exception as e:
         logger.error(f"Error fetching Maverick Bear stocks: {str(e)}")
         return {"error": str(e), "status": "error"}
@@ -113,6 +133,13 @@ def get_supply_demand_breakouts(
         Dictionary containing supply/demand breakout screening results
     """
     try:
+        from maverick_mcp.data.cache import get_from_cache, save_to_cache
+
+        cache_key = f"v1:screening:breakouts:{limit}:{filter_moving_averages}"
+        cached = get_from_cache(cache_key)
+        if cached is not None:
+            return cached
+
         from maverick_mcp.data.models import SessionLocal, SupplyDemandBreakoutStocks
 
         with SessionLocal() as session:
@@ -123,13 +150,16 @@ def get_supply_demand_breakouts(
             else:
                 stocks = SupplyDemandBreakoutStocks.get_top_stocks(session, limit=limit)
 
-            return {
+            result = {
                 "status": "success",
                 "count": len(stocks),
                 "stocks": [stock.to_dict() for stock in stocks],
                 "screening_type": "supply_demand_breakout",
                 "description": "Stocks breaking out from accumulation with strong demand dynamics",
             }
+
+        save_to_cache(cache_key, result, ttl=1800)
+        return result
     except Exception as e:
         logger.error(f"Error fetching supply/demand breakout stocks: {str(e)}")
         return {"error": str(e), "status": "error"}
@@ -370,6 +400,13 @@ def get_ranked_watchlist(
             include_bearish = include_bearish.lower() in ("true", "1", "yes")
         days_back = int(days_back)
 
+        from maverick_mcp.data.cache import get_from_cache, save_to_cache
+
+        cache_key = f"v1:screening:ranked:{max_symbols}:{include_bearish}:{days_back}"
+        cached = get_from_cache(cache_key)
+        if cached is not None:
+            return cached
+
         from maverick_mcp.data.models import SessionLocal
 
         candidates: dict[str, dict[str, Any]] = {}
@@ -397,13 +434,16 @@ def get_ranked_watchlist(
         for i, item in enumerate(ranked):
             item["rank"] = i + 1
 
-        return {
+        result = {
             "status": "success",
             "watchlist": ranked,
             "total_candidates": total_candidates,
             "algorithms_queried": algorithms_queried,
             "screening_date": screening_date.isoformat() if screening_date else None,
         }
+
+        save_to_cache(cache_key, result, ttl=1800)
+        return result
 
     except Exception as e:
         logger.error(f"Error getting ranked watchlist: {e}")
@@ -543,6 +583,13 @@ def get_market_regime() -> dict[str, Any]:
         Dictionary with regime, confidence, indicators, and strategy_guidance
     """
     try:
+        from maverick_mcp.data.cache import get_from_cache, save_to_cache
+
+        cache_key = "v1:market:regime"
+        cached = get_from_cache(cache_key)
+        if cached is not None:
+            return cached
+
         spy = _fetch_spy_metrics()
         if "error" in spy:
             return _default_regime(spy["error"])
@@ -559,7 +606,7 @@ def get_market_regime() -> dict[str, Any]:
             breadth=breadth,
         )
 
-        return {
+        result = {
             "status": "success",
             "regime": regime,
             "confidence": confidence,
@@ -572,6 +619,9 @@ def get_market_regime() -> dict[str, Any]:
             "breadth_pct": breadth,
             "strategy_guidance": guidance,
         }
+
+        save_to_cache(cache_key, result, ttl=300)
+        return result
 
     except Exception as e:
         logger.error(f"Error detecting market regime: {e}")

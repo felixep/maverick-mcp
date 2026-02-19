@@ -548,7 +548,7 @@ class MaverickStocks(Base, TimestampMixin):
     combined_score = Column(Integer, default=0)
 
     # Relationships
-    stock = relationship("Stock", back_populates="maverick_stocks")
+    stock = relationship("Stock", back_populates="maverick_stocks", lazy="joined")
 
     def __repr__(self):
         return f"<MaverickStock(stock_id={self.stock_id}, close={self.close_price}, score={self.combined_score})>"
@@ -669,7 +669,7 @@ class MaverickBearStocks(Base, TimestampMixin):
     score = Column(Integer, default=0)
 
     # Relationships
-    stock = relationship("Stock", back_populates="maverick_bear_stocks")
+    stock = relationship("Stock", back_populates="maverick_bear_stocks", lazy="joined")
 
     def __repr__(self):
         return f"<MaverickBearStock(stock_id={self.stock_id}, close={self.close_price}, score={self.score})>"
@@ -794,7 +794,7 @@ class SupplyDemandBreakoutStocks(Base, TimestampMixin):
     breakout_strength = Column(Numeric(5, 2), default=0)
 
     # Relationships
-    stock = relationship("Stock", back_populates="supply_demand_stocks")
+    stock = relationship("Stock", back_populates="supply_demand_stocks", lazy="joined")
 
     def __repr__(self):
         return f"<SupplyDemandBreakoutStock(stock_id={self.stock_id}, close={self.close_price}, momentum={self.momentum_score})>"  # formerly rs
