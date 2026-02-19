@@ -11,7 +11,33 @@ import logging
 import os
 from datetime import datetime, time, timedelta, timezone
 
+import aiohttp
+
 logger = logging.getLogger(__name__)
+
+
+async def _send_telegram(text: str) -> None:
+    """Send a Telegram message if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not bot_token or not chat_id:
+        logger.debug("Telegram not configured — skipping notification")
+        return
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    error = await resp.text()
+                    logger.error(f"Telegram send failed ({resp.status}): {error}")
+    except Exception as exc:
+        logger.error(f"Telegram send error: {exc}")
+
+_ET_DATETIME_FMT = "%Y-%m-%d %I:%M %p ET"
 
 # US Eastern timezone offset (UTC-5 standard, UTC-4 daylight)
 ET_OFFSET_STANDARD = timezone(timedelta(hours=-5))
@@ -35,6 +61,30 @@ def _get_et_now() -> datetime:
     return utc_now.astimezone(ET_OFFSET_STANDARD)
 
 
+def _build_screening_message(et_now: datetime, bar_result: dict, screening_result: dict) -> str:
+    """Build a Telegram message summarising the daily screening run."""
+    new_records = bar_result.get("new_records", 0)
+    symbols = bar_result.get("symbols", 0)
+    maverick = screening_result.get("maverick", 0)
+    bear = screening_result.get("bear", 0)
+    sd = screening_result.get("supply_demand", 0)
+    status = screening_result.get("status", "unknown")
+    status_emoji = "✅" if status == "completed" else "❌"
+    lines = [
+        f"📊 *Daily Screening Refresh* {status_emoji}",
+        f"_{et_now.strftime(_ET_DATETIME_FMT)}_",
+        "",
+        f"*Bar Refresh:* {new_records:,} new records for {symbols:,} stocks",
+        f"*Maverick Bullish:* {maverick} candidates",
+        f"*Bear Setup:* {bear} candidates",
+        f"*Supply/Demand Breakout:* {sd} candidates",
+    ]
+    if status != "completed":
+        error = screening_result.get("error", "unknown error")
+        lines.append(f"\n⚠️ *Error:* {error[:200]}")
+    return "\n".join(lines)
+
+
 class ScreeningScheduler:
     """Background scheduler that refreshes screening data daily after market close."""
 
@@ -50,6 +100,7 @@ class ScreeningScheduler:
 
     async def start(self):
         """Start the background scheduler."""
+        await asyncio.sleep(0)  # yield to event loop
         if self._running:
             logger.warning("Screening scheduler already running")
             return
@@ -65,10 +116,7 @@ class ScreeningScheduler:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+            await asyncio.gather(self._task, return_exceptions=True)
         logger.info("Screening scheduler stopped")
 
     async def _scheduler_loop(self):
@@ -89,22 +137,25 @@ class ScreeningScheduler:
 
                 if is_weekday and past_screening_time and not_run_today:
                     logger.info(
-                        f"Triggering daily data refresh + screening at {et_now.strftime('%Y-%m-%d %I:%M %p')} ET"
+                        f"Triggering daily data refresh + screening at {et_now.strftime(_ET_DATETIME_FMT)}"
                     )
                     # Step 1: Refresh daily bars from Alpaca
+                    bar_result: dict = {}
                     try:
-                        await self._refresh_daily_bars()
+                        bar_result = await self._refresh_daily_bars()
                     except Exception as e:
                         logger.error(f"Daily bar refresh failed: {e} — screening will use cached data")
                     # Step 2: Run screening on fresh data
-                    await self.run_screening()
+                    screening_result = await self.run_screening()
                     self._last_run_date = current_date
+                    # Step 3: Send Telegram notification
+                    await _send_telegram(_build_screening_message(et_now, bar_result, screening_result))
 
                 # Sleep 60 seconds before next check
                 await asyncio.sleep(60)
 
             except asyncio.CancelledError:
-                break
+                raise
             except Exception as e:
                 logger.error(f"Scheduler loop error: {e}")
                 await asyncio.sleep(300)  # Wait 5 min on error
@@ -121,6 +172,7 @@ class ScreeningScheduler:
 
         Uses Alpaca batch API — efficient for both small and large symbol lists.
         """
+        await asyncio.sleep(0)  # yield to event loop before blocking DB work
         from maverick_mcp.config.database_self_contained import (
             SelfContainedDatabaseSession,
             init_self_contained_database,
@@ -308,7 +360,7 @@ class ScreeningScheduler:
             "running": self._running,
             "screening_time": self.screening_time.strftime("%I:%M %p ET"),
             "last_run": self._last_run_date.isoformat() if self._last_run_date else None,
-            "current_time_et": et_now.strftime("%Y-%m-%d %I:%M %p ET"),
+            "current_time_et": et_now.strftime(_ET_DATETIME_FMT),
             "next_run": self._next_run_time(et_now),
         }
 
@@ -321,7 +373,7 @@ class ScreeningScheduler:
         )
 
         if et_now.time() < self.screening_time and et_now.weekday() < 5:
-            return today_run.strftime("%Y-%m-%d %I:%M %p ET")
+            return today_run.strftime(_ET_DATETIME_FMT)
 
         # Find next weekday
         next_day = et_now + timedelta(days=1)
@@ -333,7 +385,7 @@ class ScreeningScheduler:
             minute=self.screening_time.minute,
             second=0,
         )
-        return next_run.strftime("%Y-%m-%d %I:%M %p ET")
+        return next_run.strftime(_ET_DATETIME_FMT)
 
 
 # Singleton instance
