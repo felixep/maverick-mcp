@@ -113,14 +113,67 @@ solely for Claude Desktop's MCP/SSE connection.
 
 ---
 
-## Expected Impact
+## Benchmark Results (2026-02-19, production)
 
-| Change | Latency reduction | Notes |
-|--------|-------------------|-------|
-| REST API endpoints | ~80% per call | Eliminates MCP handshake |
-| Batch endpoint | 30x fewer calls | 52 vs 1,560 |
-| N+1 query fix | 20x fewer DB queries | 1 vs 21 per screening call |
-| Redis screening cache | Instant repeat calls | 30 min TTL |
-| Market regime cache | 3 s saved / call | 5 min TTL |
-| Health cache | 1,896 heavy calls eliminated | 30 s TTL |
-| Pool size increase | Prevents starvation | 25 max vs 8 |
+Tested from local machine → Unraid server (`192.168.10.251`).  Each endpoint
+called 3 times; averages shown below.
+
+### Per-endpoint comparison
+
+| Endpoint | MCP Proxy (avg) | REST Direct (avg) | Speedup | Saved |
+|----------|----------------:|------------------:|--------:|------:|
+| Health Check | 1,052 ms | 11 ms | **95.6x** | -1,041 ms |
+| News Sentiment | 11,195 ms | 3,247 ms | **3.4x** | -7,948 ms |
+| Screening: Maverick | 53 ms | 19 ms | **2.7x** | -34 ms |
+| Screening: Bear | 56 ms | 19 ms | **3.0x** | -37 ms |
+| Screening: Breakouts | 55 ms | 19 ms | **2.9x** | -36 ms |
+| Ranked Watchlist | 64 ms | 14 ms | **4.7x** | -50 ms |
+| Market Regime | 42 ms | 13 ms | **3.3x** | -29 ms |
+| Earnings Calendar | 318 ms | 234 ms | 1.4x | -84 ms |
+| Technical Analysis | 3,082 ms | 3,350 ms | ~same | compute-bound |
+| Support/Resistance | 1,622 ms | 1,640 ms | ~same | compute-bound |
+
+> Technical Analysis and Support/Resistance are compute-bound (data fetch +
+> indicator calculation dominates).  The MCP handshake overhead is negligible
+> relative to 1.5–3 seconds of actual work.
+
+### Batch analysis (new — no MCP equivalent)
+
+| Config | REST Batch | MCP Equivalent | Speedup |
+|--------|----------:|---------------:|--------:|
+| 2 tickers (w/ news) | 9.0 s | 11.2 s (6 calls) | 1.2x |
+| 5 tickers (w/ news) | 19.4 s | ~28 s (15 calls) | 1.4x |
+| 10 tickers (no news) | 30.8 s | ~46 s (20 calls) | 1.5x |
+
+### Cached endpoints (2nd+ call within TTL)
+
+| Endpoint | Cached response | TTL |
+|----------|----------------:|-----|
+| Health | 11 ms | N/A (lightweight) |
+| Screening: Maverick | 19 ms | 30 min |
+| Screening: Bear | 19 ms | 30 min |
+| Screening: Breakouts | 19 ms | 30 min |
+| Ranked Watchlist | 14 ms | 30 min |
+| Market Regime | 13 ms | 5 min |
+
+### Projected full-cycle impact (520 tickers)
+
+| Metric | Before (MCP proxy) | After (REST batch) |
+|--------|--------------------:|-------------------:|
+| Calls per cycle | 1,560 | 52 |
+| Per-ticker time | ~5.8 s | ~3.1 s (in batch) |
+| Estimated wall time | ~50 min | ~27 min |
+| **Time saved** | — | **~23 min (46%)** |
+
+### Key takeaways
+
+- **Health polling** sees the biggest relative gain: 95.6x faster, saving ~33
+  minutes of cumulative overhead per day across 1,896 polls.
+- **News sentiment** is the biggest absolute win per call: 3.4x faster (~8 s
+  saved) because the MCP handshake compounds with external API latency.
+- **Screening + regime** endpoints benefit from both REST speedup and Redis
+  caching — repeat calls within TTL return in 13–19 ms.
+- **Batch endpoint** reduces HTTP round-trips by 30x and runs analyses in
+  parallel, but the per-ticker compute time is the same.
+- **Technical analysis** is compute-bound — REST vs MCP makes no meaningful
+  difference because the 1.5–3 s of actual work dwarfs the ~40 ms handshake.

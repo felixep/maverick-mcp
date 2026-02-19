@@ -259,13 +259,47 @@ gradually.
 
 ---
 
-## Summary of Expected Improvements
+## Benchmark Results (2026-02-19)
 
-| Before | After |
-|--------|-------|
-| ~1 s per call (MCP overhead) | ~50–500 ms per call (actual computation) |
-| 1,560 calls per analysis cycle | ~52 batch calls |
-| ~26 min analysis wall time | ~5 min (estimate) |
-| Health poll: 1 s | Health poll: 5 ms |
-| Screening: DB hit every call | Screening: cached 30 min |
-| Market regime: 1–2 s (yfinance) | Cached 5 min |
+Measured on production (local machine → Unraid `192.168.10.251`), 3 runs each.
+
+### Per-endpoint latency
+
+| Endpoint | MCP Proxy | REST Direct | Speedup |
+|----------|----------:|------------:|--------:|
+| Health Check | 1,052 ms | 11 ms | **95.6x** |
+| News Sentiment | 11,195 ms | 3,247 ms | **3.4x** |
+| Screening: Maverick | 53 ms | 19 ms | **2.7x** |
+| Screening: Bear | 56 ms | 19 ms | **3.0x** |
+| Screening: Breakouts | 55 ms | 19 ms | **2.9x** |
+| Ranked Watchlist | 64 ms | 14 ms | **4.7x** |
+| Market Regime | 42 ms | 13 ms | **3.3x** |
+| Earnings Calendar | 318 ms | 234 ms | 1.4x |
+| Technical Analysis | 3,082 ms | 3,350 ms | ~same |
+| Support/Resistance | 1,622 ms | 1,640 ms | ~same |
+
+> Technical Analysis and Support/Resistance are compute-bound — the REST path
+> does not speed them up because the actual data fetch + calculation (1.5–3 s)
+> dwarfs any protocol overhead.
+
+### Batch analysis
+
+| Batch size | REST (1 call) | Old MCP equivalent | Speedup |
+|------------|----------:|-------------------:|--------:|
+| 2 tickers (w/ news) | 9.0 s | 11.2 s (6 calls) | 1.2x |
+| 5 tickers (w/ news) | 19.4 s | ~28 s (15 calls) | 1.4x |
+| 10 tickers (no news) | 30.8 s | ~46 s (20 calls) | 1.5x |
+
+### Cached screening (2nd+ call within TTL)
+
+All screening and regime endpoints return in **13–19 ms** on cache hit (Redis).
+Cache is invalidated automatically when the daily screening scheduler runs at
+5:30 PM ET.
+
+### Full-cycle projection (520 tickers)
+
+| Metric | Before | After |
+|--------|-------:|------:|
+| Calls per cycle | 1,560 | 52 |
+| Estimated wall time | ~50 min | ~27 min |
+| **Time saved** | — | **~23 min (46%)** |
