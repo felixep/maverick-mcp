@@ -357,18 +357,9 @@ logger.info("Tools registered successfully")
 from maverick_mcp.api.routers.health_enhanced import router as health_router
 from maverick_mcp.api.routers.monitoring import router as monitoring_router
 
-# Add monitoring and health endpoints to the FastMCP app's FastAPI instance
-if hasattr(mcp, "fastapi_app") and mcp.fastapi_app:
-    mcp.fastapi_app.include_router(monitoring_router, tags=["monitoring"])
-    mcp.fastapi_app.include_router(health_router, tags=["health"])
-
-    # Direct REST API for programmatic consumers (autonomous-trader, n8n, etc.)
-    # Bypasses MCP protocol overhead (~1s handshake per call) for non-Claude clients.
-    from maverick_mcp.api.routers.trader_api import trader_router
-
-    mcp.fastapi_app.include_router(trader_router, tags=["trader-api"])
-
-    logger.info("Monitoring, health, and trader-api endpoints registered with FastAPI application")
+# NOTE: monitoring_router and health_router are available for mounting but
+# FastMCP's Starlette app is only created at server start time.  The trader
+# REST API is mounted in the startup section below (search for "rest_api").
 
 # Add Enhanced Rate Limiting Middleware
 # Configure limits based on settings
@@ -1228,22 +1219,41 @@ if __name__ == "__main__":
                 debug=settings.api.debug,
                 log_level=settings.api.log_level.upper(),
             )
-        elif args.transport == "streamable-http":
+        else:
+            # For HTTP-based transports (SSE / streamable-http), build the
+            # Starlette app ourselves so we can mount the direct REST API
+            # before handing it off to uvicorn.
+            import uvicorn
+
+            transport = args.transport if args.transport == "streamable-http" else "sse"
+            sse_path = "/sse" if transport == "sse" else None
+
+            app = mcp.http_app(transport=transport, path=sse_path)
+
+            # Mount the trader REST API as a FastAPI sub-application so that
+            # programmatic consumers bypass MCP protocol overhead entirely.
+            from fastapi import FastAPI
+
+            from maverick_mcp.api.routers.trader_api import trader_router
+
+            rest_api = FastAPI(title="MaverickMCP REST API")
+            rest_api.include_router(trader_router)
+            app.mount("/api", rest_api)
+
             logger.info(
-                f"Starting {settings.app_name} server with streamable-http transport on http://{args.host}:{args.port}"
+                f"Starting {settings.app_name} server with {transport} transport "
+                f"on http://{args.host}:{args.port} (REST API on /api/v1/*)"
             )
-            mcp.run(
-                transport="streamable-http",
-                port=args.port,
+
+            config = uvicorn.Config(
+                app,
                 host=args.host,
-            )
-        else:  # sse
-            logger.info(
-                f"Starting {settings.app_name} server with SSE transport on http://{args.host}:{args.port}"
-            )
-            mcp.run(
-                transport="sse",
                 port=args.port,
-                host=args.host,
-                path="/sse",  # No trailing slash - both /sse and /sse/ will work with the monkey-patch
+                log_level=settings.api.log_level.lower(),
+                timeout_graceful_shutdown=0,
+                lifespan="on",
             )
+            server = uvicorn.Server(config)
+            import asyncio
+
+            asyncio.run(server.serve())

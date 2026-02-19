@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-trader_router = APIRouter(prefix="/api/v1", tags=["trader-api"])
+trader_router = APIRouter(prefix="/v1", tags=["trader-api"])
 
 
 # ---------------------------------------------------------------------------
