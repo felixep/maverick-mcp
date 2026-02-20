@@ -13,8 +13,23 @@ import pandas as pd
 
 from maverick_mcp.providers.stock_data import EnhancedStockDataProvider
 
-# Thread pool for async operations
-executor = ThreadPoolExecutor(max_workers=4)
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Thread pool for async operations — sized for batch analysis (up to 16 tickers)
+executor = ThreadPoolExecutor(max_workers=8)
+
+# Reuse a single provider instance to avoid per-call DB connection tests and
+# calendar/pool initialisation overhead when many tickers run concurrently.
+_stock_provider: EnhancedStockDataProvider | None = None
+
+
+def _get_stock_provider() -> EnhancedStockDataProvider:
+    global _stock_provider
+    if _stock_provider is None:
+        _stock_provider = EnhancedStockDataProvider()
+    return _stock_provider
 
 
 def get_stock_dataframe(ticker: str, days: int = 365) -> pd.DataFrame:
@@ -40,8 +55,7 @@ def get_stock_dataframe(ticker: str, days: int = 365) -> pd.DataFrame:
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
 
-    # Get stock data provider
-    stock_provider = EnhancedStockDataProvider()
+    stock_provider = _get_stock_provider()
 
     # Fetch data and add technical indicators
     df = stock_provider.get_stock_data(ticker, start_str, end_str)

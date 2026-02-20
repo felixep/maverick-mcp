@@ -42,8 +42,8 @@ logger = get_logger("maverick_mcp.routers.technical_enhanced")
 # Create the enhanced technical analysis router
 technical_enhanced_router: FastMCP = FastMCP("Technical_Analysis_Enhanced")
 
-# Thread pool for blocking operations
-executor = ThreadPoolExecutor(max_workers=4)
+# Thread pool for blocking operations — sized for batch analysis concurrency
+executor = ThreadPoolExecutor(max_workers=8)
 
 
 class TechnicalAnalysisTimeoutError(Exception):
@@ -115,7 +115,7 @@ async def _check_fingerprint(
     """Return an 'unchanged' stub if the data fingerprint matches *known_fp*."""
     try:
         df = await asyncio.wait_for(
-            get_stock_dataframe_async(ticker, days), timeout=15.0,
+            get_stock_dataframe_async(ticker, days), timeout=30.0,
         )
         if df.empty:
             return None
@@ -262,7 +262,7 @@ async def _execute_technical_analysis_with_logging(
     try:
         df = await asyncio.wait_for(
             get_stock_dataframe_async(ticker, days),
-            timeout=15.0,  # Alpaca is fast, but cache gap-fill may add latency
+            timeout=30.0,  # Allow headroom for thread-pool queuing + gap-fill
         )
 
         if df.empty:
@@ -277,7 +277,7 @@ async def _execute_technical_analysis_with_logging(
         tool_logger.step("data_validation", f"Retrieved {len(df)} data points")
 
     except TimeoutError:
-        raise TechnicalAnalysisError(f"Data fetch for {ticker} timed out (15s)")
+        raise TechnicalAnalysisError(f"Data fetch for {ticker} timed out (30s)")
     except Exception as e:
         raise TechnicalAnalysisError(f"Failed to fetch data for {ticker}: {str(e)}")
 

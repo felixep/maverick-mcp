@@ -194,13 +194,18 @@ class EnhancedStockDataProvider:
                     logger.info(
                         f"Fetching missing data for {symbol} from {miss_start} to {miss_end}"
                     )
-                    missing_df = self._fetch_stock_data(
-                        symbol, miss_start, miss_end, None, interval
-                    )
-                    if not missing_df.empty:
-                        all_dfs.append(missing_df)
-                        # Cache the new data
-                        self._cache_price_data(session, symbol, missing_df)
+                    try:
+                        missing_df = self._fetch_stock_data(
+                            symbol, miss_start, miss_end, None, interval
+                        )
+                        if not missing_df.empty:
+                            all_dfs.append(missing_df)
+                            # Cache the new data
+                            self._cache_price_data(session, symbol, missing_df)
+                    except Exception as e:
+                        logger.warning(
+                            f"Gap fill failed for {symbol} ({miss_start}..{miss_end}): {e} — using cached data"
+                        )
 
                 # Combine all data
                 combined_df = pd.concat(all_dfs).sort_index()
