@@ -418,11 +418,43 @@ def _process_bear_stocks(session, days_back: int, candidates: dict) -> tuple[int
     return len(stocks), screening_date
 
 
+def _sort_key_for(sort_by: str):
+    """Return a sort-key function for the given ranking strategy."""
+    if sort_by == "momentum":
+        return lambda x: x.get("momentum_score", 0)
+    if sort_by == "oversold":
+        # Lower momentum = more oversold; invert so lowest comes first
+        return lambda x: -x.get("momentum_score", 100)
+    if sort_by == "breakout_proximity":
+        return lambda x: x.get("breakout_strength", x.get("composite_score", 0))
+    if sort_by == "novelty":
+        # Prefer tickers in fewer algorithms (fresh discoveries), then by score
+        return lambda x: (-len(x.get("algorithms", [])), x.get("composite_score", 0))
+    # "balanced" (default)
+    return lambda x: x.get("composite_score", 0)
+
+
+def _apply_exclude(
+    result: dict[str, Any], exclude_set: set[str], max_symbols: int
+) -> dict[str, Any]:
+    """Filter excluded tickers from a watchlist result dict."""
+    if not exclude_set:
+        return result
+    filtered = dict(result)
+    filtered["watchlist"] = [
+        item for item in result["watchlist"]
+        if item["ticker"] not in exclude_set
+    ][:max_symbols]
+    return filtered
+
+
 def get_ranked_watchlist(
     max_symbols: int | str = 10,
     include_bearish: bool | str = False,
     days_back: int | str = 3,
     bypass_cache: bool = False,
+    sort_by: str = "balanced",
+    exclude: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Get a ranked, deduplicated watchlist from all screening algorithms.
@@ -436,6 +468,8 @@ def get_ranked_watchlist(
         include_bearish: Whether to include bearish setups (default: False)
         days_back: Days back to look for screening results (default: 3, handles weekends)
         bypass_cache: If True, skip cache and fetch fresh data
+        sort_by: Ranking strategy — balanced|momentum|oversold|breakout_proximity|novelty
+        exclude: Ticker symbols to exclude from results
 
     Returns:
         Dictionary containing ranked watchlist with scores and algorithms
@@ -445,14 +479,15 @@ def get_ranked_watchlist(
         if isinstance(include_bearish, str):
             include_bearish = include_bearish.lower() in ("true", "1", "yes")
         days_back = int(days_back)
+        exclude_set = {t.upper() for t in (exclude or [])}
 
         from maverick_mcp.data.cache import get_from_cache, save_to_cache
 
-        cache_key = f"v1:screening:ranked:{max_symbols}:{include_bearish}:{days_back}"
+        cache_key = f"v1:screening:ranked:{max_symbols}:{include_bearish}:{days_back}:{sort_by}"
         if not bypass_cache:
             cached = get_from_cache(cache_key)
             if cached is not None:
-                return cached
+                return _apply_exclude(cached, exclude_set, max_symbols)
 
         from maverick_mcp.data.models import SessionLocal
 
@@ -477,9 +512,13 @@ def get_ranked_watchlist(
 
         total_candidates = maverick_count + sd_count + bear_count
 
+        if exclude_set:
+            candidates = {t: c for t, c in candidates.items() if t not in exclude_set}
+
+        sort_fn = _sort_key_for(sort_by)
         ranked = sorted(
             candidates.values(),
-            key=lambda x: x["composite_score"],
+            key=sort_fn,
             reverse=True,
         )[:max_symbols]
 
@@ -492,6 +531,7 @@ def get_ranked_watchlist(
             "watchlist": ranked,
             "total_candidates": total_candidates,
             "algorithms_queried": algorithms_queried,
+            "sort_by": sort_by,
             "screening_date": maverick_date.isoformat() if maverick_date else None,
             "data_freshness": {
                 "oldest_date": min(all_dates).isoformat() if all_dates else None,
