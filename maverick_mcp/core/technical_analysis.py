@@ -124,6 +124,8 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df["adx_14"] = adx["ADX_14"]
     else:
         df["adx_14"] = np.nan
+    # VWAP (daily approximation)
+    df["vwap"] = calculate_vwap(df)
 
     return df
 
@@ -150,52 +152,135 @@ def _resolve_bollinger_columns(columns: Sequence[str]) -> tuple[str, str, str] |
     return None
 
 
+def _smart_round(price: float, min_decimals: int = 2) -> float:
+    """Round price with adaptive precision for penny stocks."""
+    import math
+
+    if price == 0:
+        return 0.0
+    magnitude = -int(math.floor(math.log10(abs(price))))
+    decimals = max(min_decimals, magnitude + 1)
+    return round(price, decimals)
+
+
+def _cluster_levels(levels: list[float], tolerance: float) -> list[float]:
+    """Group nearby price levels within tolerance and return cluster averages.
+
+    Args:
+        levels: List of price levels to cluster
+        tolerance: Maximum relative difference to merge (e.g. 0.02 = 2%)
+
+    Returns:
+        List of clustered price levels (averaged within each cluster)
+    """
+    if not levels:
+        return []
+    sorted_levels = sorted(levels)
+    clusters: list[list[float]] = [[sorted_levels[0]]]
+    for level in sorted_levels[1:]:
+        cluster_avg = sum(clusters[-1]) / len(clusters[-1])
+        if (
+            cluster_avg != 0
+            and abs(level - cluster_avg) / abs(cluster_avg) <= tolerance
+        ):
+            clusters[-1].append(level)
+        else:
+            clusters.append([level])
+    return [sum(c) / len(c) for c in clusters]
+
+
+def _find_fractal_lows(values: np.ndarray) -> list[float]:
+    """Find fractal lows (local minima using 5-bar window)."""
+    fractals = []
+    for i in range(2, len(values) - 2):
+        if (
+            values[i] < values[i - 1]
+            and values[i] < values[i - 2]
+            and values[i] < values[i + 1]
+            and values[i] < values[i + 2]
+        ):
+            fractals.append(float(values[i]))
+    return fractals
+
+
+def _find_fractal_highs(values: np.ndarray) -> list[float]:
+    """Find fractal highs (local maxima using 5-bar window)."""
+    fractals = []
+    for i in range(2, len(values) - 2):
+        if (
+            values[i] > values[i - 1]
+            and values[i] > values[i - 2]
+            and values[i] > values[i + 1]
+            and values[i] > values[i + 2]
+        ):
+            fractals.append(float(values[i]))
+    return fractals
+
+
 def identify_support_levels(df: pd.DataFrame) -> list[float]:
     """
-    Identify support levels using recent lows
+    Identify support levels using fractal-based detection.
+
+    Finds local minima (5-bar fractals) in recent price data, clusters
+    nearby levels, and returns the top 3 below the current price.
 
     Args:
         df: DataFrame with price data
 
     Returns:
-        List of support price levels
+        List of support price levels (up to 3)
     """
-    # Use the lowest points in recent periods
-    last_month = df.iloc[-30:] if len(df) >= 30 else df
-    min_price = last_month["low"].min()
+    lookback = TECHNICAL_CONFIG.SUPPORT_RESISTANCE_LOOKBACK
+    tolerance = TECHNICAL_CONFIG.SUPPORT_RESISTANCE_TOLERANCE
+    recent = df.iloc[-lookback:] if len(df) >= lookback else df
+    current_price = float(df["close"].iloc[-1])
 
-    # Additional support levels
-    support_levels = [
-        round(min_price, 2),
-        round(df["close"].iloc[-1] * 0.95, 2),  # 5% below current price
-        round(df["close"].iloc[-1] * 0.90, 2),  # 10% below current price
-    ]
+    fractal_lows = _find_fractal_lows(recent["low"].values)
+    clusters = _cluster_levels(fractal_lows, tolerance)
 
-    return sorted(set(support_levels))
+    # Filter to levels below current price
+    support = sorted([lvl for lvl in clusters if lvl < current_price], reverse=True)[:3]
+
+    # Fallback: if no fractals found, use the absolute low
+    if not support:
+        min_price = float(recent["low"].min())
+        if min_price < current_price:
+            support = [min_price]
+
+    return sorted([_smart_round(s) for s in support])
 
 
 def identify_resistance_levels(df: pd.DataFrame) -> list[float]:
     """
-    Identify resistance levels using recent highs
+    Identify resistance levels using fractal-based detection.
+
+    Finds local maxima (5-bar fractals) in recent price data, clusters
+    nearby levels, and returns the top 3 above the current price.
 
     Args:
         df: DataFrame with price data
 
     Returns:
-        List of resistance price levels
+        List of resistance price levels (up to 3)
     """
-    # Use the highest points in recent periods
-    last_month = df.iloc[-30:] if len(df) >= 30 else df
-    max_price = last_month["high"].max()
+    lookback = TECHNICAL_CONFIG.SUPPORT_RESISTANCE_LOOKBACK
+    tolerance = TECHNICAL_CONFIG.SUPPORT_RESISTANCE_TOLERANCE
+    recent = df.iloc[-lookback:] if len(df) >= lookback else df
+    current_price = float(df["close"].iloc[-1])
 
-    # Additional resistance levels
-    resistance_levels = [
-        round(max_price, 2),
-        round(df["close"].iloc[-1] * 1.05, 2),  # 5% above current price
-        round(df["close"].iloc[-1] * 1.10, 2),  # 10% above current price
-    ]
+    fractal_highs = _find_fractal_highs(recent["high"].values)
+    clusters = _cluster_levels(fractal_highs, tolerance)
 
-    return sorted(set(resistance_levels))
+    # Filter to levels above current price
+    resistance = sorted([lvl for lvl in clusters if lvl > current_price])[:3]
+
+    # Fallback: if no fractals found, use the absolute high
+    if not resistance:
+        max_price = float(recent["high"].max())
+        if max_price > current_price:
+            resistance = [max_price]
+
+    return sorted([_smart_round(r) for r in resistance])
 
 
 def analyze_trend(df: pd.DataFrame) -> int:
@@ -372,9 +457,9 @@ def analyze_macd(df: pd.DataFrame) -> dict[str, Any]:
                     crossover = "bearish crossover detected"
 
         return {
-            "macd": round(macd, 2),
-            "signal": round(signal, 2),
-            "histogram": round(histogram, 2),
+            "macd": round(macd, 4),
+            "signal": round(signal, 4),
+            "histogram": round(histogram, 4),
             "indicator": signal_type,
             "crossover": crossover,
             "description": f"MACD is {signal_type} with {crossover}.",
@@ -604,6 +689,13 @@ def analyze_volume(df: pd.DataFrame) -> dict[str, Any]:
         }
 
 
+def _safe_pct_diff(a: float, b: float) -> float:
+    """Return absolute percentage difference, or inf if denominator is zero."""
+    if b == 0:
+        return float("inf")
+    return abs(a - b) / b
+
+
 def identify_chart_patterns(df: pd.DataFrame) -> list[str]:
     """
     Identify common chart patterns
@@ -631,16 +723,13 @@ def identify_chart_patterns(df: pd.DataFrame) -> list[str]:
         if (
             len(potential_bottoms) >= 2
             and potential_bottoms[-1] - potential_bottoms[-2] >= 5
+            and _safe_pct_diff(
+                recent_lows[potential_bottoms[-1]],
+                recent_lows[potential_bottoms[-2]],
+            )
+            < 0.05
         ):
-            if (
-                abs(
-                    recent_lows[potential_bottoms[-1]]
-                    - recent_lows[potential_bottoms[-2]]
-                )
-                / recent_lows[potential_bottoms[-2]]
-                < 0.05
-            ):
-                patterns.append("Double Bottom (W)")
+            patterns.append("Double Bottom (W)")
 
     # Check for potential double top (M formation)
     if len(df) >= 40:
@@ -654,47 +743,133 @@ def identify_chart_patterns(df: pd.DataFrame) -> list[str]:
             ):
                 potential_tops.append(i)
 
-        if len(potential_tops) >= 2 and potential_tops[-1] - potential_tops[-2] >= 5:
-            if (
-                abs(recent_highs[potential_tops[-1]] - recent_highs[potential_tops[-2]])
-                / recent_highs[potential_tops[-2]]
-                < 0.05
-            ):
-                patterns.append("Double Top (M)")
+        if (
+            len(potential_tops) >= 2
+            and potential_tops[-1] - potential_tops[-2] >= 5
+            and _safe_pct_diff(
+                recent_highs[potential_tops[-1]],
+                recent_highs[potential_tops[-2]],
+            )
+            < 0.05
+        ):
+            patterns.append("Double Top (M)")
 
-    # Check for bullish flag/pennant
+    # Check for bullish flag/pennant (relaxed: 80% of consolidation bars must qualify)
+    flag_threshold = TECHNICAL_CONFIG.FLAG_CONSOLIDATION_THRESHOLD
+    flag_min_pct = TECHNICAL_CONFIG.FLAG_CONSOLIDATION_MIN_PCT
     if len(df) >= 20:
         recent_prices = df["close"].iloc[-20:].values
+        consolidation_bars = range(11, 20)
+        qualifying = sum(
+            1
+            for i in consolidation_bars
+            if recent_prices[i - 1] != 0
+            and abs(recent_prices[i] - recent_prices[i - 1]) / recent_prices[i - 1]
+            < flag_threshold
+        )
         if (
             recent_prices[0] < recent_prices[10]
             and all(
                 recent_prices[i] >= recent_prices[i - 1] * 0.99 for i in range(1, 10)
             )
-            and all(
-                abs(recent_prices[i] - recent_prices[i - 1]) / recent_prices[i - 1]
-                < 0.02
-                for i in range(11, 20)
-            )
+            and qualifying >= len(consolidation_bars) * flag_min_pct
         ):
             patterns.append("Bullish Flag/Pennant")
 
-    # Check for bearish flag/pennant
+    # Check for bearish flag/pennant (relaxed: 80% of consolidation bars must qualify)
     if len(df) >= 20:
         recent_prices = df["close"].iloc[-20:].values
+        consolidation_bars = range(11, 20)
+        qualifying = sum(
+            1
+            for i in consolidation_bars
+            if recent_prices[i - 1] != 0
+            and abs(recent_prices[i] - recent_prices[i - 1]) / recent_prices[i - 1]
+            < flag_threshold
+        )
         if (
             recent_prices[0] > recent_prices[10]
             and all(
                 recent_prices[i] <= recent_prices[i - 1] * 1.01 for i in range(1, 10)
             )
-            and all(
-                abs(recent_prices[i] - recent_prices[i - 1]) / recent_prices[i - 1]
-                < 0.02
-                for i in range(11, 20)
-            )
+            and qualifying >= len(consolidation_bars) * flag_min_pct
         ):
             patterns.append("Bearish Flag/Pennant")
 
     return patterns
+
+
+def detect_price_gaps(
+    df: pd.DataFrame, min_gap_pct: float = 2.0
+) -> list[dict[str, Any]]:
+    """Detect significant price gaps (gap-up / gap-down).
+
+    A gap occurs when the current bar's open is significantly different
+    from the previous bar's close.
+
+    Args:
+        df: DataFrame with OHLCV data
+        min_gap_pct: Minimum gap size as percentage (default: 2%)
+
+    Returns:
+        List of gap events with date, type, and size
+    """
+    gaps: list[dict[str, Any]] = []
+    close_col = _get_column_case_insensitive(df, "close")
+    open_col = _get_column_case_insensitive(df, "open")
+
+    if not close_col or not open_col or len(df) < 2:
+        return gaps
+
+    for i in range(1, len(df)):
+        prev_close = df[close_col].iloc[i - 1]
+        curr_open = df[open_col].iloc[i]
+
+        if prev_close == 0 or pd.isna(prev_close) or pd.isna(curr_open):
+            continue
+
+        gap_pct = ((curr_open - prev_close) / prev_close) * 100
+
+        if abs(gap_pct) >= min_gap_pct:
+            gaps.append(
+                {
+                    "date": str(df.index[i]),
+                    "type": "gap_up" if gap_pct > 0 else "gap_down",
+                    "gap_pct": round(gap_pct, 2),
+                    "prev_close": round(float(prev_close), 4),
+                    "open": round(float(curr_open), 4),
+                }
+            )
+
+    return gaps
+
+
+def calculate_vwap(df: pd.DataFrame) -> pd.Series:
+    """Calculate Volume-Weighted Average Price (daily approximation).
+
+    For daily bars, this calculates the cumulative VWAP from the start
+    of the data. True intraday VWAP resets each session; this is a
+    rolling daily approximation useful for multi-day position sizing.
+
+    Args:
+        df: DataFrame with OHLCV data
+
+    Returns:
+        Series with VWAP values
+    """
+    close_col = _get_column_case_insensitive(df, "close")
+    high_col = _get_column_case_insensitive(df, "high")
+    low_col = _get_column_case_insensitive(df, "low")
+    volume_col = _get_column_case_insensitive(df, "volume")
+
+    if not all([close_col, high_col, low_col, volume_col]):
+        return pd.Series(dtype=float, index=df.index)
+
+    typical_price = (df[high_col] + df[low_col] + df[close_col]) / 3
+    cumulative_tp_vol = (typical_price * df[volume_col]).cumsum()
+    cumulative_vol = df[volume_col].cumsum().replace(0, np.nan)
+
+    return cumulative_tp_vol / cumulative_vol
 
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -716,7 +891,9 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     if not (high_col and low_col and close_col):
         # Fallback to old method if columns are not found (unlikely if they exist)
         # This preserves previous behavior for missing columns which might raise error later or handle it
-        logger.warning("Could not find High, Low, Close columns case-insensitively. Falling back to copy method.")
+        logger.warning(
+            "Could not find High, Low, Close columns case-insensitively. Falling back to copy method."
+        )
         df_copy = df.copy()
         df_copy.columns = [col.lower() for col in df_copy.columns]
         return ta.atr(df_copy["high"], df_copy["low"], df_copy["close"], length=period)

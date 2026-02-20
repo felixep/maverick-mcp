@@ -53,6 +53,14 @@ class TechnicalAnalysisConfig:
     SUPPORT_RESISTANCE_LOOKBACK: int = 20
     SUPPORT_RESISTANCE_TOLERANCE: float = 0.02  # 2% tolerance
 
+    # Flag/Pennant Pattern Configuration
+    FLAG_CONSOLIDATION_THRESHOLD: float = (
+        0.02  # Max bar-to-bar change during consolidation
+    )
+    FLAG_CONSOLIDATION_MIN_PCT: float = (
+        0.8  # Min fraction of bars meeting threshold (80%)
+    )
+
     # ATR Configuration
     ATR_PERIOD: int = 14
 

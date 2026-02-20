@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 screening_router: FastMCP = FastMCP("Stock_Screening")
 
 
-def get_maverick_stocks(limit: int = 20) -> dict[str, Any]:
+def get_maverick_stocks(limit: int = 20, bypass_cache: bool = False) -> dict[str, Any]:
     """
     Get top Maverick stocks from the screening results.
 
@@ -33,6 +33,7 @@ def get_maverick_stocks(limit: int = 20) -> dict[str, Any]:
 
     Args:
         limit: Maximum number of stocks to return (default: 20)
+        bypass_cache: If True, skip cache and fetch fresh data
 
     Returns:
         Dictionary containing Maverick stock screening results
@@ -41,9 +42,10 @@ def get_maverick_stocks(limit: int = 20) -> dict[str, Any]:
         from maverick_mcp.data.cache import get_from_cache, save_to_cache
 
         cache_key = f"v1:screening:maverick:{limit}"
-        cached = get_from_cache(cache_key)
-        if cached is not None:
-            return cached
+        if not bypass_cache:
+            cached = get_from_cache(cache_key)
+            if cached is not None:
+                return cached
 
         from maverick_mcp.data.models import MaverickStocks, SessionLocal
 
@@ -65,7 +67,9 @@ def get_maverick_stocks(limit: int = 20) -> dict[str, Any]:
         return {"error": str(e), "status": "error"}
 
 
-def get_maverick_bear_stocks(limit: int = 20) -> dict[str, Any]:
+def get_maverick_bear_stocks(
+    limit: int = 20, bypass_cache: bool = False
+) -> dict[str, Any]:
     """
     Get top Maverick Bear stocks from the screening results.
 
@@ -81,6 +85,7 @@ def get_maverick_bear_stocks(limit: int = 20) -> dict[str, Any]:
 
     Args:
         limit: Maximum number of stocks to return (default: 20)
+        bypass_cache: If True, skip cache and fetch fresh data
 
     Returns:
         Dictionary containing Maverick Bear stock screening results
@@ -89,9 +94,10 @@ def get_maverick_bear_stocks(limit: int = 20) -> dict[str, Any]:
         from maverick_mcp.data.cache import get_from_cache, save_to_cache
 
         cache_key = f"v1:screening:bear:{limit}"
-        cached = get_from_cache(cache_key)
-        if cached is not None:
-            return cached
+        if not bypass_cache:
+            cached = get_from_cache(cache_key)
+            if cached is not None:
+                return cached
 
         from maverick_mcp.data.models import MaverickBearStocks, SessionLocal
 
@@ -114,7 +120,7 @@ def get_maverick_bear_stocks(limit: int = 20) -> dict[str, Any]:
 
 
 def get_supply_demand_breakouts(
-    limit: int = 20, filter_moving_averages: bool = False
+    limit: int = 20, filter_moving_averages: bool = False, bypass_cache: bool = False
 ) -> dict[str, Any]:
     """
     Get stocks showing supply/demand breakout patterns from accumulation.
@@ -128,6 +134,7 @@ def get_supply_demand_breakouts(
     Args:
         limit: Maximum number of stocks to return (default: 20)
         filter_moving_averages: If True, only return stocks above all moving averages
+        bypass_cache: If True, skip cache and fetch fresh data
 
     Returns:
         Dictionary containing supply/demand breakout screening results
@@ -136,9 +143,10 @@ def get_supply_demand_breakouts(
         from maverick_mcp.data.cache import get_from_cache, save_to_cache
 
         cache_key = f"v1:screening:breakouts:{limit}:{filter_moving_averages}"
-        cached = get_from_cache(cache_key)
-        if cached is not None:
-            return cached
+        if not bypass_cache:
+            cached = get_from_cache(cache_key)
+            if cached is not None:
+                return cached
 
         from maverick_mcp.data.models import SessionLocal, SupplyDemandBreakoutStocks
 
@@ -292,7 +300,9 @@ def _merge_candidate(
         )
 
 
-def _process_maverick_stocks(session, days_back: int, candidates: dict) -> tuple[int, Any]:
+def _process_maverick_stocks(
+    session, days_back: int, candidates: dict
+) -> tuple[int, Any]:
     """Process Maverick bullish screening results into candidates."""
     from maverick_mcp.data.models import MaverickStocks
 
@@ -308,25 +318,36 @@ def _process_maverick_stocks(session, days_back: int, candidates: dict) -> tuple
         momentum = float(stock.momentum_score or 0)
         composite = (combined / 8.0 * 100 * 0.6) + (momentum * 0.4)
 
-        _merge_candidate(candidates, ticker, composite, "maverick_bullish", {
-            "momentum_score": round(momentum, 1),
-            "combined_score": int(combined),
-            "close_price": float(stock.close_price or 0),
-        })
+        _merge_candidate(
+            candidates,
+            ticker,
+            composite,
+            "maverick_bullish",
+            {
+                "momentum_score": round(momentum, 1),
+                "combined_score": int(combined),
+                "close_price": float(stock.close_price or 0),
+            },
+        )
 
-        if stock.date_analyzed and (screening_date is None or stock.date_analyzed > screening_date):
+        if stock.date_analyzed and (
+            screening_date is None or stock.date_analyzed > screening_date
+        ):
             screening_date = stock.date_analyzed
 
     return len(stocks), screening_date
 
 
-def _process_supply_demand_stocks(session, days_back: int, candidates: dict) -> int:
+def _process_supply_demand_stocks(
+    session, days_back: int, candidates: dict
+) -> tuple[int, Any]:
     """Process Supply/Demand breakout screening results into candidates."""
     from maverick_mcp.data.models import SupplyDemandBreakoutStocks
 
     stocks = SupplyDemandBreakoutStocks.get_top_stocks(session, limit=100)
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=days_back)
     count = 0
+    screening_date = None
 
     for stock in stocks:
         ticker = stock.stock.ticker_symbol if stock.stock else None
@@ -341,20 +362,32 @@ def _process_supply_demand_stocks(session, days_back: int, candidates: dict) -> 
         breakout = float(stock.breakout_strength or 0)
         composite = (momentum * 0.5) + (accumulation * 0.3) + (breakout * 20 * 0.2)
 
-        _merge_candidate(candidates, ticker, composite, "supply_demand_breakout", {
-            "momentum_score": round(momentum, 1),
-            "breakout_strength": round(breakout, 1),
-            "close_price": float(stock.close_price or 0),
-        })
+        _merge_candidate(
+            candidates,
+            ticker,
+            composite,
+            "supply_demand_breakout",
+            {
+                "momentum_score": round(momentum, 1),
+                "breakout_strength": round(breakout, 1),
+                "close_price": float(stock.close_price or 0),
+            },
+        )
 
-    return count
+        if stock.date_analyzed and (
+            screening_date is None or stock.date_analyzed > screening_date
+        ):
+            screening_date = stock.date_analyzed
+
+    return count, screening_date
 
 
-def _process_bear_stocks(session, days_back: int, candidates: dict) -> int:
+def _process_bear_stocks(session, days_back: int, candidates: dict) -> tuple[int, Any]:
     """Process Maverick Bear screening results into candidates."""
     from maverick_mcp.data.models import MaverickBearStocks
 
     stocks = MaverickBearStocks.get_latest_analysis(session, days_back=days_back)
+    screening_date = None
 
     for stock in stocks:
         ticker = stock.stock.ticker_symbol if stock.stock else None
@@ -365,19 +398,31 @@ def _process_bear_stocks(session, days_back: int, candidates: dict) -> int:
         momentum = float(stock.momentum_score or 0)
         composite = (score * 0.6) + ((100 - momentum) * 0.4)
 
-        _merge_candidate(candidates, ticker, composite, "maverick_bearish", {
-            "momentum_score": round(momentum, 1),
-            "bear_score": int(score),
-            "close_price": float(stock.close_price or 0),
-        })
+        _merge_candidate(
+            candidates,
+            ticker,
+            composite,
+            "maverick_bearish",
+            {
+                "momentum_score": round(momentum, 1),
+                "bear_score": int(score),
+                "close_price": float(stock.close_price or 0),
+            },
+        )
 
-    return len(stocks)
+        if stock.date_analyzed and (
+            screening_date is None or stock.date_analyzed > screening_date
+        ):
+            screening_date = stock.date_analyzed
+
+    return len(stocks), screening_date
 
 
 def get_ranked_watchlist(
     max_symbols: int | str = 10,
     include_bearish: bool | str = False,
     days_back: int | str = 3,
+    bypass_cache: bool = False,
 ) -> dict[str, Any]:
     """
     Get a ranked, deduplicated watchlist from all screening algorithms.
@@ -390,6 +435,7 @@ def get_ranked_watchlist(
         max_symbols: Maximum symbols to return (default: 10)
         include_bearish: Whether to include bearish setups (default: False)
         days_back: Days back to look for screening results (default: 3, handles weekends)
+        bypass_cache: If True, skip cache and fetch fresh data
 
     Returns:
         Dictionary containing ranked watchlist with scores and algorithms
@@ -403,9 +449,10 @@ def get_ranked_watchlist(
         from maverick_mcp.data.cache import get_from_cache, save_to_cache
 
         cache_key = f"v1:screening:ranked:{max_symbols}:{include_bearish}:{days_back}"
-        cached = get_from_cache(cache_key)
-        if cached is not None:
-            return cached
+        if not bypass_cache:
+            cached = get_from_cache(cache_key)
+            if cached is not None:
+                return cached
 
         from maverick_mcp.data.models import SessionLocal
 
@@ -413,15 +460,20 @@ def get_ranked_watchlist(
         algorithms_queried = ["maverick_bullish", "supply_demand_breakout"]
 
         with SessionLocal() as session:
-            maverick_count, screening_date = _process_maverick_stocks(
+            maverick_count, maverick_date = _process_maverick_stocks(
                 session, days_back, candidates
             )
-            sd_count = _process_supply_demand_stocks(session, days_back, candidates)
+            sd_count, sd_date = _process_supply_demand_stocks(
+                session, days_back, candidates
+            )
 
             bear_count = 0
+            bear_date = None
             if include_bearish:
                 algorithms_queried.append("maverick_bearish")
-                bear_count = _process_bear_stocks(session, days_back, candidates)
+                bear_count, bear_date = _process_bear_stocks(
+                    session, days_back, candidates
+                )
 
         total_candidates = maverick_count + sd_count + bear_count
 
@@ -434,12 +486,19 @@ def get_ranked_watchlist(
         for i, item in enumerate(ranked):
             item["rank"] = i + 1
 
+        all_dates = [d for d in [maverick_date, sd_date, bear_date] if d is not None]
         result = {
             "status": "success",
             "watchlist": ranked,
             "total_candidates": total_candidates,
             "algorithms_queried": algorithms_queried,
-            "screening_date": screening_date.isoformat() if screening_date else None,
+            "screening_date": maverick_date.isoformat() if maverick_date else None,
+            "data_freshness": {
+                "oldest_date": min(all_dates).isoformat() if all_dates else None,
+                "maverick_date": maverick_date.isoformat() if maverick_date else None,
+                "supply_demand_date": sd_date.isoformat() if sd_date else None,
+                "bear_date": bear_date.isoformat() if bear_date else None,
+            },
         }
 
         save_to_cache(cache_key, result, ttl=1800)
@@ -466,7 +525,11 @@ def _fetch_spy_metrics() -> dict[str, Any]:
         return {"error": "No SPY data"}
 
     current_price = float(hist["Close"].iloc[-1])
-    sma_200 = float(hist["Close"].rolling(200).mean().dropna().iloc[-1]) if len(hist) >= 200 else current_price
+    sma_200 = (
+        float(hist["Close"].rolling(200).mean().dropna().iloc[-1])
+        if len(hist) >= 200
+        else current_price
+    )
     # SMA slope: compare current SMA to SMA 22 trading days ago
     sma_series = hist["Close"].rolling(200).mean().dropna()
     if len(sma_series) >= 22:
@@ -501,7 +564,11 @@ def _fetch_vix() -> float:
 
 def _calculate_breadth() -> float:
     """Calculate breadth proxy: bullish / (bullish + bearish) from screening tables."""
-    from maverick_mcp.data.models import MaverickBearStocks, MaverickStocks, SessionLocal
+    from maverick_mcp.data.models import (
+        MaverickBearStocks,
+        MaverickStocks,
+        SessionLocal,
+    )
 
     with SessionLocal() as session:
         bullish = MaverickStocks.get_latest_analysis(session, days_back=3)
@@ -525,50 +592,74 @@ def _classify_regime(
     """Classify market regime from indicators. Returns (regime, confidence, guidance)."""
     # CORRECTION: SPY down >10% from 52w high AND VIX > 25
     if pct_from_high < -10 and vix > 25:
-        return "CORRECTION", 0.9, {
-            "position_size_multiplier": 0.25,
-            "allow_new_longs": False,
-            "allow_new_shorts": True,
-        }
+        return (
+            "CORRECTION",
+            0.9,
+            {
+                "position_size_multiplier": 0.25,
+                "allow_new_longs": False,
+                "allow_new_shorts": True,
+            },
+        )
 
     # STRONG_BEAR: below SMA, SMA falling, low breadth, high VIX
     if not spy_above_sma and not sma_rising and breadth < 30 and vix > 25:
-        return "STRONG_BEAR", 0.85, {
-            "position_size_multiplier": 0.25,
-            "allow_new_longs": False,
-            "allow_new_shorts": True,
-        }
+        return (
+            "STRONG_BEAR",
+            0.85,
+            {
+                "position_size_multiplier": 0.25,
+                "allow_new_longs": False,
+                "allow_new_shorts": True,
+            },
+        )
 
     # BEAR: below SMA, low breadth
     if not spy_above_sma and breadth < 40:
-        return "BEAR", 0.75, {
-            "position_size_multiplier": 0.5,
-            "allow_new_longs": False,
-            "allow_new_shorts": True,
-        }
+        return (
+            "BEAR",
+            0.75,
+            {
+                "position_size_multiplier": 0.5,
+                "allow_new_longs": False,
+                "allow_new_shorts": True,
+            },
+        )
 
     # STRONG_BULL: above SMA, SMA rising, high breadth, low VIX
     if spy_above_sma and sma_rising and breadth > 60 and vix < 18:
-        return "STRONG_BULL", 0.85, {
-            "position_size_multiplier": 1.0,
-            "allow_new_longs": True,
-            "allow_new_shorts": False,
-        }
+        return (
+            "STRONG_BULL",
+            0.85,
+            {
+                "position_size_multiplier": 1.0,
+                "allow_new_longs": True,
+                "allow_new_shorts": False,
+            },
+        )
 
     # BULL: above SMA, decent breadth
     if spy_above_sma and breadth > 50:
-        return "BULL", 0.7, {
-            "position_size_multiplier": 1.0,
-            "allow_new_longs": True,
-            "allow_new_shorts": False,
-        }
+        return (
+            "BULL",
+            0.7,
+            {
+                "position_size_multiplier": 1.0,
+                "allow_new_longs": True,
+                "allow_new_shorts": False,
+            },
+        )
 
     # NEUTRAL: everything else
-    return "NEUTRAL", 0.5, {
-        "position_size_multiplier": 0.75,
-        "allow_new_longs": True,
-        "allow_new_shorts": False,
-    }
+    return (
+        "NEUTRAL",
+        0.5,
+        {
+            "position_size_multiplier": 0.75,
+            "allow_new_longs": True,
+            "allow_new_shorts": False,
+        },
+    )
 
 
 def get_market_regime() -> dict[str, Any]:

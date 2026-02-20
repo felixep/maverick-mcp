@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 
 trader_router = APIRouter(prefix="/v1", tags=["trader-api"])
 
+# Limit concurrent ticker analyses in batch endpoint to avoid DB/API contention
+_batch_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_batch_semaphore() -> asyncio.Semaphore:
+    global _batch_semaphore
+    if _batch_semaphore is None:
+        _batch_semaphore = asyncio.Semaphore(10)
+    return _batch_semaphore
+
 
 # ---------------------------------------------------------------------------
 # Request / response models
@@ -103,27 +113,36 @@ async def news_sentiment(
 
 
 @trader_router.get("/screening/maverick")
-def screening_maverick(limit: int = Query(20)) -> dict[str, Any]:
+def screening_maverick(
+    limit: int = Query(20),
+    bypass_cache: bool = Query(False),
+) -> dict[str, Any]:
     """Top Maverick bullish stocks."""
     from maverick_mcp.api.routers.screening import get_maverick_stocks
 
-    return get_maverick_stocks(limit)
+    return get_maverick_stocks(limit, bypass_cache=bypass_cache)
 
 
 @trader_router.get("/screening/bear")
-def screening_bear(limit: int = Query(20)) -> dict[str, Any]:
+def screening_bear(
+    limit: int = Query(20),
+    bypass_cache: bool = Query(False),
+) -> dict[str, Any]:
     """Top Maverick bearish stocks."""
     from maverick_mcp.api.routers.screening import get_maverick_bear_stocks
 
-    return get_maverick_bear_stocks(limit)
+    return get_maverick_bear_stocks(limit, bypass_cache=bypass_cache)
 
 
 @trader_router.get("/screening/breakouts")
-def screening_breakouts(limit: int = Query(20)) -> dict[str, Any]:
+def screening_breakouts(
+    limit: int = Query(20),
+    bypass_cache: bool = Query(False),
+) -> dict[str, Any]:
     """Top supply/demand breakout stocks."""
     from maverick_mcp.api.routers.screening import get_supply_demand_breakouts
 
-    return get_supply_demand_breakouts(limit)
+    return get_supply_demand_breakouts(limit, bypass_cache=bypass_cache)
 
 
 @trader_router.get("/screening/ranked-watchlist")
@@ -131,11 +150,14 @@ def screening_ranked_watchlist(
     max_symbols: int = Query(10),
     include_bearish: bool = Query(False),
     days_back: int = Query(3),
+    bypass_cache: bool = Query(False),
 ) -> dict[str, Any]:
     """Ranked, deduplicated watchlist from all screening algorithms."""
     from maverick_mcp.api.routers.screening import get_ranked_watchlist
 
-    return get_ranked_watchlist(max_symbols, include_bearish, days_back)
+    return get_ranked_watchlist(
+        max_symbols, include_bearish, days_back, bypass_cache=bypass_cache
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -209,40 +231,41 @@ async def batch_analysis(body: BatchAnalysisRequest) -> dict[str, Any]:
     from maverick_mcp.validation.technical import TechnicalAnalysisRequest
 
     async def _analyse_one(ticker: str) -> tuple[str, dict[str, Any]]:
-        tasks: list[asyncio.Task] = [
-            asyncio.create_task(
-                get_full_technical_analysis_enhanced(
-                    TechnicalAnalysisRequest(ticker=ticker, days=body.days)
+        async with _get_batch_semaphore():
+            tasks: list[asyncio.Task] = [
+                asyncio.create_task(
+                    get_full_technical_analysis_enhanced(
+                        TechnicalAnalysisRequest(ticker=ticker, days=body.days)
+                    )
+                ),
+                asyncio.create_task(get_support_resistance(ticker, body.days)),
+            ]
+            if body.include_news:
+                tasks.append(asyncio.create_task(get_news_sentiment_enhanced(ticker)))
+
+            gathered = await asyncio.gather(*tasks, return_exceptions=True)
+
+            result: dict[str, Any] = {
+                "technical": (
+                    gathered[0]
+                    if not isinstance(gathered[0], BaseException)
+                    else {"error": str(gathered[0])}
+                ),
+                "support_resistance": (
+                    gathered[1]
+                    if not isinstance(gathered[1], BaseException)
+                    else {"error": str(gathered[1])}
+                ),
+            }
+            if body.include_news and len(gathered) > 2:
+                result["news"] = (
+                    gathered[2]
+                    if not isinstance(gathered[2], BaseException)
+                    else {"error": str(gathered[2])}
                 )
-            ),
-            asyncio.create_task(get_support_resistance(ticker, body.days)),
-        ]
-        if body.include_news:
-            tasks.append(asyncio.create_task(get_news_sentiment_enhanced(ticker)))
+            return ticker, result
 
-        gathered = await asyncio.gather(*tasks, return_exceptions=True)
-
-        result: dict[str, Any] = {
-            "technical": (
-                gathered[0]
-                if not isinstance(gathered[0], BaseException)
-                else {"error": str(gathered[0])}
-            ),
-            "support_resistance": (
-                gathered[1]
-                if not isinstance(gathered[1], BaseException)
-                else {"error": str(gathered[1])}
-            ),
-        }
-        if body.include_news and len(gathered) > 2:
-            result["news"] = (
-                gathered[2]
-                if not isinstance(gathered[2], BaseException)
-                else {"error": str(gathered[2])}
-            )
-        return ticker, result
-
-    # Process all tickers concurrently (bounded by the server's thread pool)
+    # Process all tickers concurrently (bounded by semaphore to max 10 at a time)
     pairs = await asyncio.gather(
         *[_analyse_one(t.upper()) for t in body.tickers],
         return_exceptions=True,

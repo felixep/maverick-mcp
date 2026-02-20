@@ -37,6 +37,7 @@ async def _send_telegram(text: str) -> None:
     except Exception as exc:
         logger.error(f"Telegram send error: {exc}")
 
+
 _ET_DATETIME_FMT = "%Y-%m-%d %I:%M %p ET"
 
 # US Eastern timezone offset (UTC-5 standard, UTC-4 daylight)
@@ -61,7 +62,9 @@ def _get_et_now() -> datetime:
     return utc_now.astimezone(ET_OFFSET_STANDARD)
 
 
-def _build_screening_message(et_now: datetime, bar_result: dict, screening_result: dict) -> str:
+def _build_screening_message(
+    et_now: datetime, bar_result: dict, screening_result: dict
+) -> str:
     """Build a Telegram message summarising the daily screening run."""
     new_records = bar_result.get("new_records", 0)
     symbols = bar_result.get("symbols", 0)
@@ -69,19 +72,28 @@ def _build_screening_message(et_now: datetime, bar_result: dict, screening_resul
     bear = screening_result.get("bear", 0)
     sd = screening_result.get("supply_demand", 0)
     status = screening_result.get("status", "unknown")
+    algo_status = screening_result.get("algo_status", {})
     status_emoji = "✅" if status == "completed" else "❌"
+
+    def _algo_icon(name: str) -> str:
+        s = algo_status.get(name, "unknown")
+        return "✅" if s == "success" else "❌"
+
     lines = [
         f"📊 *Daily Screening Refresh* {status_emoji}",
         f"_{et_now.strftime(_ET_DATETIME_FMT)}_",
         "",
         f"*Bar Refresh:* {new_records:,} new records for {symbols:,} stocks",
-        f"*Maverick Bullish:* {maverick} candidates",
-        f"*Bear Setup:* {bear} candidates",
-        f"*Supply/Demand Breakout:* {sd} candidates",
+        f"{_algo_icon('maverick')} *Maverick Bullish:* {maverick} candidates",
+        f"{_algo_icon('bear')} *Bear Setup:* {bear} candidates",
+        f"{_algo_icon('supply_demand')} *Supply/Demand Breakout:* {sd} candidates",
     ]
     if status != "completed":
         error = screening_result.get("error", "unknown error")
         lines.append(f"\n⚠️ *Error:* {error[:200]}")
+    retried = screening_result.get("retried_algorithms", [])
+    if retried:
+        lines.append(f"\n🔄 *Retried:* {', '.join(retried)}")
     return "\n".join(lines)
 
 
@@ -131,8 +143,7 @@ class ScreeningScheduler:
                 is_weekday = et_now.weekday() < 5  # Mon-Fri
                 past_screening_time = current_time >= self.screening_time
                 not_run_today = (
-                    self._last_run_date is None
-                    or self._last_run_date != current_date
+                    self._last_run_date is None or self._last_run_date != current_date
                 )
 
                 if is_weekday and past_screening_time and not_run_today:
@@ -144,12 +155,18 @@ class ScreeningScheduler:
                     try:
                         bar_result = await self._refresh_daily_bars()
                     except Exception as e:
-                        logger.error(f"Daily bar refresh failed: {e} — screening will use cached data")
+                        logger.error(
+                            f"Daily bar refresh failed: {e} — screening will use cached data"
+                        )
                     # Step 2: Run screening on fresh data
                     screening_result = await self.run_screening()
-                    self._last_run_date = current_date
+                    # Only mark as run if at least one algo succeeded (allows retry otherwise)
+                    if screening_result.get("status") != "failed":
+                        self._last_run_date = current_date
                     # Step 3: Send Telegram notification
-                    await _send_telegram(_build_screening_message(et_now, bar_result, screening_result))
+                    await _send_telegram(
+                        _build_screening_message(et_now, bar_result, screening_result)
+                    )
 
                 # Sleep 60 seconds before next check
                 await asyncio.sleep(60)
@@ -188,7 +205,9 @@ class ScreeningScheduler:
 
         if symbols:
             # Targeted refresh: 2-year lookback so new tickers get full bar history
-            start = (datetime.now(timezone.utc) - timedelta(days=730)).strftime("%Y-%m-%d")
+            start = (datetime.now(timezone.utc) - timedelta(days=730)).strftime(
+                "%Y-%m-%d"
+            )
             target_symbols = [s.upper().strip() for s in symbols]
             logger.info(
                 f"Targeted bar refresh for {len(target_symbols)} symbol(s) "
@@ -196,7 +215,9 @@ class ScreeningScheduler:
             )
         else:
             # Daily scheduled refresh: 7-day lookback covers weekends/holidays
-            start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+            start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime(
+                "%Y-%m-%d"
+            )
             with SelfContainedDatabaseSession() as session:
                 target_symbols = [
                     row[0]
@@ -204,7 +225,9 @@ class ScreeningScheduler:
                     .filter(Stock.is_active == True)
                     .all()
                 ]
-            logger.info(f"Refreshing daily bars for {len(target_symbols)} active stocks")
+            logger.info(
+                f"Refreshing daily bars for {len(target_symbols)} active stocks"
+            )
 
         total_inserted = 0
         batch_size = 100
@@ -238,22 +261,21 @@ class ScreeningScheduler:
                      If provided, only screens those specific symbols.
         """
         scope = f"{len(symbols)} symbols" if symbols else "all stocks"
-        results = {
+        results: dict = {
             "started_at": datetime.now(timezone.utc).isoformat(),
             "status": "running",
             "symbols_requested": symbols,
             "maverick": 0,
             "bear": 0,
             "supply_demand": 0,
+            "algo_status": {},
+            "retried_algorithms": [],
         }
 
         try:
             logger.info(f"Starting screening refresh ({scope})...")
 
             # When specific symbols are requested, fetch their bars first.
-            # New pinned tickers may have no history; without bars the screener
-            # silently skips them. The targeted refresh uses a 2-year lookback
-            # so MA200 and RSI calculations have sufficient data immediately.
             if symbols:
                 try:
                     bar_result = await self._refresh_daily_bars(symbols=symbols)
@@ -262,7 +284,9 @@ class ScreeningScheduler:
                         f"for {bar_result['symbols']} symbol(s)"
                     )
                 except Exception as e:
-                    logger.warning(f"Pre-screening bar fetch failed (screening will use cached data): {e}")
+                    logger.warning(
+                        f"Pre-screening bar fetch failed (screening will use cached data): {e}"
+                    )
 
             # Import here to avoid circular imports
             from maverick_mcp.config.database_self_contained import (
@@ -276,11 +300,9 @@ class ScreeningScheduler:
                 bulk_insert_screening_data,
             )
 
-            # Initialize self-contained DB session
             database_url = os.environ.get("DATABASE_URL")
             init_self_contained_database(database_url=database_url)
 
-            # Import the screener
             import sys
             from pathlib import Path
 
@@ -293,60 +315,73 @@ class ScreeningScheduler:
             screener = StockScreener()
             today = datetime.now().date()
 
+            # Algorithm definitions for DRY retry logic
+            algo_defs = [
+                (
+                    "maverick",
+                    "maverick",
+                    screener.run_maverick_screening,
+                    MaverickStocks,
+                ),
+                ("bear", "bear", screener.run_bear_screening, MaverickBearStocks),
+                (
+                    "supply_demand",
+                    "supply_demand",
+                    screener.run_supply_demand_screening,
+                    SupplyDemandBreakoutStocks,
+                ),
+            ]
+
+            failed_algos: list[tuple] = []
+
             with SelfContainedDatabaseSession() as session:
-                # Maverick (bullish) screening
-                try:
-                    maverick_results = await screener.run_maverick_screening(
-                        session, symbols=symbols
-                    )
-                    if maverick_results:
-                        count = bulk_insert_screening_data(
-                            session, MaverickStocks, maverick_results, today
-                        )
-                        results["maverick"] = count
-                        logger.info(f"Maverick screening: {count} candidates")
-                except Exception as e:
-                    logger.error(f"Maverick screening failed: {e}")
+                for key, result_key, run_fn, model_cls in algo_defs:
+                    try:
+                        algo_results = await run_fn(session, symbols=symbols)
+                        if algo_results:
+                            count = bulk_insert_screening_data(
+                                session, model_cls, algo_results, today
+                            )
+                            results[result_key] = count
+                            logger.info(f"{key} screening: {count} candidates")
+                        results["algo_status"][key] = "success"
+                    except Exception as e:
+                        logger.error(f"{key} screening failed: {e}")
+                        results["algo_status"][key] = "failed"
+                        failed_algos.append((key, result_key, run_fn, model_cls))
 
-                # Bear screening
-                try:
-                    bear_results = await screener.run_bear_screening(
-                        session, symbols=symbols
-                    )
-                    if bear_results:
-                        count = bulk_insert_screening_data(
-                            session, MaverickBearStocks, bear_results, today
-                        )
-                        results["bear"] = count
-                        logger.info(f"Bear screening: {count} candidates")
-                except Exception as e:
-                    logger.error(f"Bear screening failed: {e}")
+                # Retry failed algorithms once
+                for key, result_key, run_fn, model_cls in failed_algos:
+                    try:
+                        logger.info(f"Retrying {key} screening...")
+                        algo_results = await run_fn(session, symbols=symbols)
+                        if algo_results:
+                            count = bulk_insert_screening_data(
+                                session, model_cls, algo_results, today
+                            )
+                            results[result_key] = count
+                            logger.info(
+                                f"{key} screening retry succeeded: {count} candidates"
+                            )
+                        results["algo_status"][key] = "success"
+                        results["retried_algorithms"].append(key)
+                    except Exception as e:
+                        logger.error(f"{key} screening retry also failed: {e}")
 
-                # Supply/Demand breakout screening
-                try:
-                    sd_results = await screener.run_supply_demand_screening(
-                        session, symbols=symbols
-                    )
-                    if sd_results:
-                        count = bulk_insert_screening_data(
-                            session, SupplyDemandBreakoutStocks, sd_results, today
-                        )
-                        results["supply_demand"] = count
-                        logger.info(f"Supply/Demand screening: {count} candidates")
-                except Exception as e:
-                    logger.error(f"Supply/Demand screening failed: {e}")
-
-            results["status"] = "completed"
+            any_succeeded = any(v == "success" for v in results["algo_status"].values())
+            results["status"] = "completed" if any_succeeded else "failed"
             results["completed_at"] = datetime.now(timezone.utc).isoformat()
 
             # Invalidate screening caches so next request picks up fresh data
-            self._invalidate_screening_cache()
+            if any_succeeded:
+                self._invalidate_screening_cache()
 
             logger.info(
                 f"Screening refresh complete ({scope}): "
                 f"maverick={results['maverick']}, "
                 f"bear={results['bear']}, "
-                f"supply_demand={results['supply_demand']}"
+                f"supply_demand={results['supply_demand']}, "
+                f"algo_status={results['algo_status']}"
             )
 
         except Exception as e:
@@ -376,7 +411,9 @@ class ScreeningScheduler:
         return {
             "running": self._running,
             "screening_time": self.screening_time.strftime("%I:%M %p ET"),
-            "last_run": self._last_run_date.isoformat() if self._last_run_date else None,
+            "last_run": self._last_run_date.isoformat()
+            if self._last_run_date
+            else None,
             "current_time_et": et_now.strftime(_ET_DATETIME_FMT),
             "next_run": self._next_run_time(et_now),
         }

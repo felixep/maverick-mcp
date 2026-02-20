@@ -735,7 +735,7 @@ class EnhancedStockDataProvider:
                 logger.warning(
                     f"Column {col} missing from data for {symbol}, adding empty column"
                 )
-                df[col] = 0 if col == "Volume" else 0.0
+                df[col] = float("nan")
 
         df.index.name = "Date"
         return df
@@ -1147,9 +1147,7 @@ class EnhancedStockDataProvider:
                 try:
                     sym_df = batch.get(symbol)
                     if sym_df is None or sym_df.empty:
-                        logger.debug(
-                            f"No Alpaca batch data for {symbol}, skipping"
-                        )
+                        logger.debug(f"No Alpaca batch data for {symbol}, skipping")
                         continue
 
                     latest = sym_df.iloc[-1]
@@ -1173,14 +1171,16 @@ class EnhancedStockDataProvider:
                         "change_percent": round(change_percent, 2),
                         "volume": volume,
                         "timestamp": sym_df.index[-1],
-                        "timestamp_display": pd.Timestamp(
-                            sym_df.index[-1]
-                        ).strftime("%Y-%m-%d %H:%M:%S"),
+                        "timestamp_display": pd.Timestamp(sym_df.index[-1]).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
                         "is_real_time": False,  # Alpaca free tier has 15min delay
                     }
 
                 except Exception as e:
-                    logger.error(f"Error processing Alpaca batch data for {symbol}: {e}")
+                    logger.error(
+                        f"Error processing Alpaca batch data for {symbol}: {e}"
+                    )
 
         except Exception as e:
             logger.error(f"Alpaca batch fetch failed: {e}")

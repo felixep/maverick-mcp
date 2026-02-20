@@ -61,9 +61,7 @@ class AlpacaDataPool:
             raise ValueError(
                 "Alpaca credentials required. Set ALPACA_API_KEY and ALPACA_SECRET_KEY."
             )
-        self._client = StockHistoricalDataClient(
-            api_key=api_key, secret_key=secret_key
-        )
+        self._client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
         self._initialized = True
         logger.info("AlpacaDataPool initialized")
 
@@ -104,7 +102,9 @@ class AlpacaDataPool:
             end = end_dt.strftime("%Y-%m-%d")
 
         result = self.batch_get_history([symbol], start, end)
-        return result.get(symbol, pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"]))
+        return result.get(
+            symbol, pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        )
 
     def batch_get_history(
         self,
@@ -169,8 +169,8 @@ class AlpacaDataPool:
                     }
                 )
 
-                # Convert timestamp index to timezone-naive dates
-                sym_df.index = sym_df.index.tz_localize(None)
+                # Convert timestamp index to clean date-only (strips 05:00 UTC offset)
+                sym_df.index = pd.to_datetime(sym_df.index.date)
                 sym_df.index.name = "Date"
 
                 # Keep only OHLCV columns

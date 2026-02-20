@@ -29,6 +29,22 @@ from maverick_mcp.providers.stock_data import (
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """Replace NaN/Inf float values with None for safe JSON serialization."""
+    import math
+
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(item) for item in obj]
+    return obj
+
+
 # Create the data router
 data_router: FastMCP = FastMCP("Data_Operations")
 
@@ -85,7 +101,7 @@ def fetch_stock_data(
             result: dict[str, Any] = json.loads(json_data) if json_data else {}
             result["ticker"] = ticker
             result["record_count"] = len(data)
-            return result
+            return _sanitize_for_json(result)
     except Exception as e:
         logger.error(f"Error fetching stock data for {ticker}: {e}")
         return {"error": str(e), "ticker": ticker}
@@ -147,12 +163,16 @@ def fetch_stock_data_batch(
                 logger.error(f"Error fetching data for {ticker}: {e}")
                 results[ticker] = {"status": "error", "error": str(e)}
 
-    return {
-        "results": results,
-        "success_count": sum(1 for r in results.values() if r["status"] == "success"),
-        "error_count": sum(1 for r in results.values() if r["status"] == "error"),
-        "tickers": tickers,
-    }
+    return _sanitize_for_json(
+        {
+            "results": results,
+            "success_count": sum(
+                1 for r in results.values() if r["status"] == "success"
+            ),
+            "error_count": sum(1 for r in results.values() if r["status"] == "error"),
+            "tickers": tickers,
+        }
+    )
 
 
 def get_stock_info(ticker: str) -> dict[str, Any]:
