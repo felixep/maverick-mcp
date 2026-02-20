@@ -40,18 +40,18 @@ class TestDatabasePoolConfig:
         config = DatabasePoolConfig()
 
         # Test environment variable defaults
-        assert config.pool_size == int(os.getenv("DB_POOL_SIZE", "20"))
-        assert config.max_overflow == int(os.getenv("DB_MAX_OVERFLOW", "10"))
+        assert config.pool_size == int(os.getenv("DB_POOL_SIZE", "5"))
+        assert config.max_overflow == int(os.getenv("DB_MAX_OVERFLOW", "3"))
         assert config.pool_timeout == int(os.getenv("DB_POOL_TIMEOUT", "30"))
         assert config.pool_recycle == int(os.getenv("DB_POOL_RECYCLE", "3600"))
         assert config.max_database_connections == int(
-            os.getenv("DB_MAX_CONNECTIONS", "100")
+            os.getenv("DB_MAX_CONNECTIONS", "20")
         )
         assert config.reserved_superuser_connections == int(
-            os.getenv("DB_RESERVED_SUPERUSER_CONNECTIONS", "3")
+            os.getenv("DB_RESERVED_SUPERUSER_CONNECTIONS", "2")
         )
         assert config.expected_concurrent_users == int(
-            os.getenv("DB_EXPECTED_CONCURRENT_USERS", "20")
+            os.getenv("DB_EXPECTED_CONCURRENT_USERS", "5")
         )
         assert config.connections_per_user == float(
             os.getenv("DB_CONNECTIONS_PER_USER", "1.2")
@@ -389,7 +389,7 @@ class TestFactoryFunctions:
 
         assert isinstance(config, DatabasePoolConfig)
         # Should use environment variable defaults
-        assert config.pool_size == int(os.getenv("DB_POOL_SIZE", "20"))
+        assert config.pool_size == int(os.getenv("DB_POOL_SIZE", "5"))
 
     def test_get_development_pool_config(self):
         """Test development pool configuration factory."""

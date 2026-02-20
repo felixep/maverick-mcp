@@ -733,13 +733,13 @@ class AgentConfig(BaseModel):
 class DatabaseConfig(BaseModel):
     """Database connection and pooling configuration settings."""
 
-    # Connection pool settings
+    # Connection pool settings (defaults fit PostgreSQL Alpine max_connections=20)
     pool_size: int = Field(
-        default_factory=lambda: int(os.getenv("DB_POOL_SIZE", "20")),
+        default_factory=lambda: int(os.getenv("DB_POOL_SIZE", "5")),
         description="Database connection pool size",
     )
     pool_max_overflow: int = Field(
-        default_factory=lambda: int(os.getenv("DB_POOL_MAX_OVERFLOW", "10")),
+        default_factory=lambda: int(os.getenv("DB_POOL_MAX_OVERFLOW", "3")),
         description="Maximum overflow connections above pool size",
     )
     pool_timeout: int = Field(

@@ -37,15 +37,16 @@ class DatabasePoolConfig(BaseModel):
     """
 
     # Core pool configuration
+    # Defaults match docker-entrypoint.sh and fit PostgreSQL Alpine max_connections=20
     pool_size: int = Field(
-        default_factory=lambda: int(os.getenv("DB_POOL_SIZE", "20")),
+        default_factory=lambda: int(os.getenv("DB_POOL_SIZE", "5")),
         ge=1,
         le=100,
         description="Number of connections to maintain in the pool (1-100)",
     )
 
     max_overflow: int = Field(
-        default_factory=lambda: int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        default_factory=lambda: int(os.getenv("DB_MAX_OVERFLOW", "3")),
         ge=0,
         le=50,
         description="Maximum overflow connections above pool size (0-50)",
@@ -66,21 +67,22 @@ class DatabasePoolConfig(BaseModel):
     )
 
     # Database capacity configuration
+    # Default 20 matches PostgreSQL Alpine; reserved 2 leaves 18 for apps
     max_database_connections: int = Field(
-        default_factory=lambda: int(os.getenv("DB_MAX_CONNECTIONS", "100")),
+        default_factory=lambda: int(os.getenv("DB_MAX_CONNECTIONS", "20")),
         description="Maximum connections allowed by database server",
     )
 
     reserved_superuser_connections: int = Field(
         default_factory=lambda: int(
-            os.getenv("DB_RESERVED_SUPERUSER_CONNECTIONS", "3")
+            os.getenv("DB_RESERVED_SUPERUSER_CONNECTIONS", "2")
         ),
         description="Connections reserved for superuser access",
     )
 
     # Application usage configuration
     expected_concurrent_users: int = Field(
-        default_factory=lambda: int(os.getenv("DB_EXPECTED_CONCURRENT_USERS", "20")),
+        default_factory=lambda: int(os.getenv("DB_EXPECTED_CONCURRENT_USERS", "5")),
         description="Expected number of concurrent users",
     )
 
