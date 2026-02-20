@@ -40,6 +40,12 @@ class BatchAnalysisRequest(BaseModel):
     tickers: list[str] = Field(..., min_length=1, max_length=50)
     include_news: bool = True
     days: int = 365
+    intraday_bars: dict[str, dict[str, Any]] | None = None
+
+
+class IntradayRefreshRequest(BaseModel):
+    tickers: list[str] = Field(..., min_length=1, max_length=20)
+    interval: str = Field("15m", pattern=r"^(1m|5m|15m|30m|1h)$")
 
 
 class ScreeningRefreshRequest(BaseModel):
@@ -210,6 +216,11 @@ def earnings_calendar(
 # ---------------------------------------------------------------------------
 
 
+def _unwrap_gathered(value: Any) -> Any:
+    """Return an error dict if value is an exception, otherwise the value itself."""
+    return {"error": str(value)} if isinstance(value, BaseException) else value
+
+
 @trader_router.post("/analysis/batch")
 async def batch_analysis(body: BatchAnalysisRequest) -> dict[str, Any]:
     """
@@ -230,12 +241,15 @@ async def batch_analysis(body: BatchAnalysisRequest) -> dict[str, Any]:
     )
     from maverick_mcp.validation.technical import TechnicalAnalysisRequest
 
+    intraday = body.intraday_bars or {}
+
     async def _analyse_one(ticker: str) -> tuple[str, dict[str, Any]]:
         async with _get_batch_semaphore():
             tasks: list[asyncio.Task] = [
                 asyncio.create_task(
                     get_full_technical_analysis_enhanced(
-                        TechnicalAnalysisRequest(ticker=ticker, days=body.days)
+                        TechnicalAnalysisRequest(ticker=ticker, days=body.days),
+                        today_bar=intraday.get(ticker),
                     )
                 ),
                 asyncio.create_task(get_support_resistance(ticker, body.days)),
@@ -246,26 +260,13 @@ async def batch_analysis(body: BatchAnalysisRequest) -> dict[str, Any]:
             gathered = await asyncio.gather(*tasks, return_exceptions=True)
 
             result: dict[str, Any] = {
-                "technical": (
-                    gathered[0]
-                    if not isinstance(gathered[0], BaseException)
-                    else {"error": str(gathered[0])}
-                ),
-                "support_resistance": (
-                    gathered[1]
-                    if not isinstance(gathered[1], BaseException)
-                    else {"error": str(gathered[1])}
-                ),
+                "technical": _unwrap_gathered(gathered[0]),
+                "support_resistance": _unwrap_gathered(gathered[1]),
             }
             if body.include_news and len(gathered) > 2:
-                result["news"] = (
-                    gathered[2]
-                    if not isinstance(gathered[2], BaseException)
-                    else {"error": str(gathered[2])}
-                )
+                result["news"] = _unwrap_gathered(gathered[2])
             return ticker, result
 
-    # Process all tickers concurrently (bounded by semaphore to max 10 at a time)
     pairs = await asyncio.gather(
         *[_analyse_one(t.upper()) for t in body.tickers],
         return_exceptions=True,
@@ -285,3 +286,27 @@ async def batch_analysis(body: BatchAnalysisRequest) -> dict[str, Any]:
         "results": results,
         "timestamp": datetime.now(UTC).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Intraday data refresh
+# ---------------------------------------------------------------------------
+
+
+@trader_router.post("/data/refresh-intraday")
+async def refresh_intraday(body: IntradayRefreshRequest) -> dict[str, Any]:
+    """Fetch and consolidate intraday bars for a list of tickers.
+
+    Uses yfinance to get 15-minute (or other interval) bars for today,
+    consolidates them into a synthetic "today" daily bar (OHLCV).
+
+    The autonomous trader calls this before batch analysis so the
+    analysis uses today's price instead of yesterday's close.
+    """
+    from maverick_mcp.providers.intraday import refresh_intraday_batch
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, refresh_intraday_batch, body.tickers, body.interval
+    )
+    return result

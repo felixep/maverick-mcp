@@ -12,7 +12,9 @@ This module fixes the "No result received from client-side tool execution" issue
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Optional
+
+import pandas as pd
 
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_access_token
@@ -55,8 +57,46 @@ class TechnicalAnalysisError(Exception):
     pass
 
 
+def _inject_today_bar(
+    df: pd.DataFrame, today_bar: dict[str, Any], ticker: str
+) -> tuple[pd.DataFrame, str]:
+    """Append a synthetic today bar to the DataFrame if it's newer than the last bar.
+
+    Returns (updated_df, price_source).
+    """
+    today_date = pd.Timestamp.now(tz="UTC").normalize()
+    last_bar_date = pd.Timestamp(df.index[-1])
+    if last_bar_date.tz is None:
+        last_bar_date = last_bar_date.tz_localize("UTC")
+    if last_bar_date.normalize() >= today_date:
+        return df, "daily_close"
+
+    new_row = pd.DataFrame(
+        {
+            "open": [today_bar["open"]],
+            "high": [today_bar["high"]],
+            "low": [today_bar["low"]],
+            "close": [today_bar["close"]],
+            "volume": [today_bar["volume"]],
+        },
+        index=[today_date],
+    )
+    # Match column casing to existing DataFrame
+    ohlcv = [c for c in df.columns if c.lower() in ("open", "high", "low", "close", "volume")]
+    new_row.columns = ohlcv[:5]
+    df = pd.concat([df, new_row])
+    logger.info(
+        "Injected today bar for %s (close=%.2f, %d intraday bars)",
+        ticker,
+        today_bar["close"],
+        today_bar.get("bar_count", 0),
+    )
+    return df, "intraday_yfinance"
+
+
 async def get_full_technical_analysis_enhanced(
     request: TechnicalAnalysisRequest,
+    today_bar: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Enhanced technical analysis with comprehensive logging and timeout handling.
@@ -70,6 +110,9 @@ async def get_full_technical_analysis_enhanced(
 
     Args:
         request: Validated technical analysis request
+        today_bar: Optional synthetic today bar from intraday refresh.
+            If provided, injected into the DataFrame so indicators use
+            today's price instead of yesterday's close.
 
     Returns:
         Dictionary containing complete technical analysis
@@ -82,12 +125,35 @@ async def get_full_technical_analysis_enhanced(
     ticker = request.ticker
     days = request.days
 
+    # Redis cache: include price hash so cache auto-invalidates on price change
+    price_hash = f":{int(today_bar['close'] * 100)}" if today_bar else ""
+    cache_key = f"v1:technical:full:{ticker}:{days}{price_hash}"
+
+    try:
+        from maverick_mcp.data.cache import get_from_cache, save_to_cache
+
+        cached = get_from_cache(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("status") == "completed":
+            logger.debug("Cache hit for %s (key=%s)", ticker, cache_key)
+            return cached
+    except Exception:
+        pass  # Cache miss or unavailable — compute fresh
+
     try:
         # Overall timeout: 25s is sufficient with Alpaca (batch API, no yfinance throttling)
-        return await asyncio.wait_for(
-            _execute_technical_analysis_with_logging(tool_logger, ticker, days),
+        result = await asyncio.wait_for(
+            _execute_technical_analysis_with_logging(tool_logger, ticker, days, today_bar),
             timeout=25.0,
         )
+
+        # Cache successful results for 30 minutes
+        if result.get("status") == "completed":
+            try:
+                save_to_cache(cache_key, result, ttl=1800)
+            except Exception:
+                pass
+
+        return result
 
     except TimeoutError:
         error_msg = f"Technical analysis for {ticker} timed out after 25 seconds"
@@ -121,7 +187,7 @@ async def get_full_technical_analysis_enhanced(
 
 
 async def _execute_technical_analysis_with_logging(
-    tool_logger, ticker: str, days: int
+    tool_logger, ticker: str, days: int, today_bar: Optional[dict[str, Any]] = None
 ) -> dict[str, Any]:
     """Execute technical analysis with comprehensive step-by-step logging."""
 
@@ -148,6 +214,11 @@ async def _execute_technical_analysis_with_logging(
 
         if df.empty:
             raise TechnicalAnalysisError(f"No data available for {ticker}")
+
+        # Inject today's intraday bar if provided and newer than last bar
+        price_source = "daily_close"
+        if today_bar:
+            df, price_source = _inject_today_bar(df, today_bar, ticker)
 
         logger.info(f"Retrieved {len(df)} data points for {ticker}")
         tool_logger.step("data_validation", f"Retrieved {len(df)} data points")
@@ -276,6 +347,7 @@ async def _execute_technical_analysis_with_logging(
                 "data_points": len(df),
                 "period_days": days,
                 "data_as_of": data_as_of,
+                "price_source": price_source,
                 "has_premium": has_premium,
                 "timestamp": datetime.now(UTC).isoformat(),
             },
