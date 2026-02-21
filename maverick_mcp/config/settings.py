@@ -500,6 +500,10 @@ class PerformanceConfig(BaseModel):
         default_factory=lambda: int(os.getenv("AGENT_CACHE_TTL", "3600")),  # 1 hour
         description="Agent state cache TTL in seconds",
     )
+    screening_cache_depth: int = Field(
+        default_factory=lambda: int(os.getenv("SCREENING_CACHE_DEPTH", "50")),
+        description="Ranked watchlist cache stores this many candidates (deeper than max_symbols for exclusion support)",
+    )
 
     # Rate limiting
     api_rate_limit_per_minute: int = Field(

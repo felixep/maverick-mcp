@@ -437,14 +437,23 @@ def _sort_key_for(sort_by: str):
 def _apply_exclude(
     result: dict[str, Any], exclude_set: set[str], max_symbols: int
 ) -> dict[str, Any]:
-    """Filter excluded tickers from a watchlist result dict."""
-    if not exclude_set:
-        return result
+    """Filter excluded tickers from a watchlist result dict.
+
+    When the cache stores a deeper list (cache_depth > max_symbols), this
+    function filters the excluded tickers and slices to max_symbols.  If the
+    remaining list is still shorter than max_symbols the ``_depth_exhausted``
+    flag is set so the caller can fall through to a fresh DB query.
+    """
     filtered = dict(result)
-    filtered["watchlist"] = [
+    if not exclude_set:
+        filtered["watchlist"] = result["watchlist"][:max_symbols]
+        return filtered
+    remaining = [
         item for item in result["watchlist"]
         if item["ticker"] not in exclude_set
-    ][:max_symbols]
+    ]
+    filtered["watchlist"] = remaining[:max_symbols]
+    filtered["_depth_exhausted"] = len(remaining) < max_symbols
     return filtered
 
 
@@ -487,7 +496,10 @@ def get_ranked_watchlist(
         if not bypass_cache:
             cached = get_from_cache(cache_key)
             if cached is not None:
-                return _apply_exclude(cached, exclude_set, max_symbols)
+                result = _apply_exclude(cached, exclude_set, max_symbols)
+                if not result.pop("_depth_exhausted", False):
+                    return result
+                logger.info("Ranked watchlist: cache depth exhausted, querying DB")
 
         from maverick_mcp.data.models import SessionLocal
 
@@ -515,18 +527,21 @@ def get_ranked_watchlist(
         if exclude_set:
             candidates = {t: c for t, c in candidates.items() if t not in exclude_set}
 
+        from maverick_mcp.config.settings import get_settings
+        cache_depth = max(get_settings().performance.screening_cache_depth, max_symbols)
+
         sort_fn = _sort_key_for(sort_by)
         ranked = sorted(
             candidates.values(),
             key=sort_fn,
             reverse=True,
-        )[:max_symbols]
+        )[:cache_depth]
 
         for i, item in enumerate(ranked):
             item["rank"] = i + 1
 
         all_dates = [d for d in [maverick_date, sd_date, bear_date] if d is not None]
-        result = {
+        cache_result = {
             "status": "success",
             "watchlist": ranked,
             "total_candidates": total_candidates,
@@ -541,7 +556,11 @@ def get_ranked_watchlist(
             },
         }
 
-        save_to_cache(cache_key, result, ttl=1800)
+        save_to_cache(cache_key, cache_result, ttl=1800)
+
+        # Return only max_symbols to the caller (cache stores deeper list)
+        result = dict(cache_result)
+        result["watchlist"] = ranked[:max_symbols]
         return result
 
     except Exception as e:
