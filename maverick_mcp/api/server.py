@@ -1041,16 +1041,9 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Failed to start health monitoring: {e}")
 
-        # Start daily screening scheduler
-        logger.info("Starting daily screening scheduler...")
-        try:
-            from maverick_mcp.utils.screening_scheduler import get_screening_scheduler
-
-            scheduler = get_screening_scheduler()
-            await scheduler.start()
-            logger.info("✅ Daily screening scheduler started (5:30 PM ET)")
-        except Exception as e:
-            logger.error(f"Failed to start screening scheduler: {e}")
+        # NOTE: the screening scheduler is started on the *server* event loop
+        # (see run_server_with_scheduler below) so that its background task
+        # survives beyond this function.
 
     asyncio.run(init_systems())
 
@@ -1256,4 +1249,18 @@ if __name__ == "__main__":
             server = uvicorn.Server(config)
             import asyncio
 
-            asyncio.run(server.serve())
+            async def run_server_with_scheduler():
+                """Run uvicorn and the screening scheduler on the same event loop."""
+                try:
+                    from maverick_mcp.utils.screening_scheduler import (
+                        get_screening_scheduler,
+                    )
+
+                    scheduler = get_screening_scheduler()
+                    await scheduler.start()
+                    logger.info("✅ Daily screening scheduler started (5:30 PM ET)")
+                except Exception as e:
+                    logger.error(f"Failed to start screening scheduler: {e}")
+                await server.serve()
+
+            asyncio.run(run_server_with_scheduler())
