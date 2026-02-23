@@ -335,10 +335,11 @@ async def screening_refresh(
     body: ScreeningRefreshRequest | None = None,
 ) -> dict[str, Any]:
     """Trigger a screening refresh, optionally for specific symbols."""
-    from maverick_mcp.api.server import screening_refresh_now
+    from maverick_mcp.utils.screening_scheduler import get_screening_scheduler
 
+    scheduler = get_screening_scheduler()
     symbols = body.symbols if body else None
-    return await screening_refresh_now(symbols)
+    return await scheduler.run_screening(symbols=symbols)
 
 
 # ---------------------------------------------------------------------------
