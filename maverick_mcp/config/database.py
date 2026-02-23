@@ -494,24 +494,23 @@ def get_pool_config_from_settings() -> DatabasePoolConfig:
     """
     Create DatabasePoolConfig from existing settings system.
 
-    This function integrates with the existing maverick_mcp.config.settings
-    to create an enhanced pool configuration while maintaining compatibility.
+    All pool parameters are read from environment variables via the Field
+    default_factory lambdas in DatabasePoolConfig.  The preset functions
+    (get_high_concurrency_pool_config, etc.) pass hardcoded values that
+    *override* the env-var defaults, so we always use the plain constructor
+    here to let env vars take effect.
 
     Returns:
-        DatabasePoolConfig based on current application settings
+        DatabasePoolConfig based on environment variables and application settings
     """
     try:
         from maverick_mcp.config.settings import settings
 
-        # Get environment for configuration selection
         environment = getattr(settings, "environment", "development").lower()
 
-        if environment in ["development", "dev", "test"]:
-            base_config = get_development_pool_config()
-        elif environment == "production":
-            base_config = get_high_concurrency_pool_config()
-        else:
-            base_config = get_default_pool_config()
+        # Always use the default constructor so that DB_POOL_SIZE,
+        # DB_EXPECTED_CONCURRENT_USERS, etc. env vars are respected.
+        base_config = DatabasePoolConfig()
 
         # Override with any specific database settings from the config
         if hasattr(settings, "db"):
@@ -527,7 +526,6 @@ def get_pool_config_from_settings() -> DatabasePoolConfig:
 
             # Apply overrides if any exist
             if overrides:
-                # Create new config with overrides
                 config_dict = base_config.model_dump()
                 config_dict.update(overrides)
                 base_config = DatabasePoolConfig(**config_dict)
